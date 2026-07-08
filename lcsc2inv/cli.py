@@ -99,22 +99,43 @@ def _print_dry_run_preview(part: LCSCPart) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _common_dry_run(ctx: click.Context, dry_run: bool | None) -> None:
+    """把 group / 子命令级 --dry-run 同步到 settings。"""
+    if dry_run is not None:
+        s = get_settings()
+        s.dry_run = dry_run
+
+
 @click.group()
 @click.option("-v", "--verbose", is_flag=True, help="Debug 日志")
-@click.option("--dry-run/--commit", default=None, help="强制 dry-run 或 commit（默认读 DRY_RUN）")
+@click.option("--dry-run/--commit", "dry_run", default=None,
+              help="强制 dry-run 或 commit（默认读 DRY_RUN）")
 @click.option("--token", default=None, help="覆盖 INVENTREE_TOKEN")
 @click.pass_context
 def cli(ctx: click.Context, verbose: bool, dry_run: bool | None, token: str | None) -> None:
-    """lcsc2inv — LCSC → InvenTree 自动导入工具。"""
+    """lcsc2inv — LCSC → InvenTree 自动导入工具。
+
+    \b
+    dry-run 用法（三种都支持）：
+        lcsc2inv --dry-run import C28323          (group 级选项)
+        lcsc2inv import C28323 --dry-run          (子命令级选项)
+        DRY_RUN=true lcsc2inv import C28323       (环境变量)
+    """
     _setup_logging(verbose)
-    s = get_settings()
-    if dry_run is not None:
-        s.dry_run = dry_run
+    _common_dry_run(ctx, dry_run)
     ctx.ensure_object(dict)
     ctx.obj["token"] = token
 
 
+# 一个共用选项，便于在每个子命令上复用（同样暴露 --dry-run/--commit）
+_dry_run_option = click.option(
+    "--dry-run/--commit", "dry_run", default=None,
+    help="强制 dry-run 或 commit（默认读 DRY_RUN；也可放在子命令前）",
+)
+
+
 @cli.command()
+@_dry_run_option
 @click.argument("code_or_url")
 @click.option("--update/--no-update", default=False, help="强制更新已存在 Part 的描述/备注")
 @click.option("--qty", type=int, default=None, help="建 StockItem 时使用的数量")
@@ -123,6 +144,7 @@ def cli(ctx: click.Context, verbose: bool, dry_run: bool | None, token: str | No
 @click.pass_context
 def import_cmd(
     ctx: click.Context,
+    dry_run: bool | None,
     code_or_url: str,
     update: bool,
     qty: int | None,
@@ -130,6 +152,7 @@ def import_cmd(
     note: str | None,
 ) -> None:
     """导入单个 LCSC 商品（如 C28323 或 https://www.lcsc.com/product-detail/C28323.html）。"""
+    _common_dry_run(ctx, dry_run)
     settings = get_settings()
     code = parse_lcsc_code(code_or_url)
     fetcher: Fetcher = default_fetcher(settings)
@@ -160,6 +183,7 @@ def import_cmd(
 
 
 @cli.command()
+@_dry_run_option
 @click.argument("csv_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--update/--no-update", default=False)
 @click.option("--no-stock", is_flag=True)
@@ -167,12 +191,14 @@ def import_cmd(
 @click.pass_context
 def batch(
     ctx: click.Context,
+    dry_run: bool | None,
     csv_path: Path,
     update: bool,
     no_stock: bool,
     workers: int,
 ) -> None:
     """从 CSV 批量导入。CSV 必须有 lcsc_code 列，可选 quantity / note 列。"""
+    _common_dry_run(ctx, dry_run)
     settings = get_settings()
     rows = _read_csv(csv_path)
     if not rows:
@@ -302,17 +328,13 @@ def doctor(ctx: click.Context) -> None:
 
 
 # ---------------------------------------------------------------------------
-# cache
+# cache（平铺到顶层，因为 chain=True 不允许嵌套子组）
 # ---------------------------------------------------------------------------
 
 
-@cli.group()
-def cache() -> None:
-    """管理本地 LCSC HTML 缓存。"""
-
-
-@cache.command("clear")
+@cli.command("cache-clear")
 def cache_clear() -> None:
+    """清理本地 LCSC HTML 缓存。"""
     s = get_settings()
     d = s.cache_dir_path
     if not d.exists():
@@ -325,8 +347,9 @@ def cache_clear() -> None:
     console.print(f"已清理 {n} 个文件 ({d})")
 
 
-@cache.command("ls")
+@cli.command("cache-ls")
 def cache_ls() -> None:
+    """列出已缓存的 LCSC 商品。"""
     s = get_settings()
     d = s.cache_dir_path
     if not d.exists():
@@ -335,11 +358,6 @@ def cache_ls() -> None:
     for p in sorted(d.glob("*.json")):
         if p.suffix == ".meta.json":
             continue
-        try:
-            meta = json.loads((p.parent / (p.name + ".meta" + ".json")).read_text())
-            # 上述拼法不正确，简化
-        except Exception:  # noqa: BLE001
-            meta = {}
         console.print(p.name)
 
 

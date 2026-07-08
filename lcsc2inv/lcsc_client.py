@@ -54,7 +54,7 @@ def parse_lcsc_code(value: str) -> str:
 
     支持两种 URL 模式：
     - 国际版：`https://www.lcsc.com/product-detail/C28323.html` → `C28323`
-    - 国内版：`https://item.szlcsc.com/360864.html` → 数字 ID（不是 C-code）
+    - 国内版：`https://item.szlcsc.com/360864.html` → `CN:360864`
 
     >>> parse_lcsc_code('C28323')
     'C28323'
@@ -79,6 +79,10 @@ def parse_lcsc_code(value: str) -> str:
     v = re.sub(r"^C[-./\\]+", "C", v)
     if re.fullmatch(r"C\d+", v):
         return v
+    # 容许国内站 ID 形式：`CN:360864` 或 `CN-360864`
+    m = re.fullmatch(r"CN[-.:]?(\d+)", v)
+    if m:
+        return f"CN:{m.group(1)}"
     # 裸数字也接受（视作国内版 numeric id）
     if re.fullmatch(r"\d+", v):
         return f"CN:{v}"
