@@ -1,0 +1,65 @@
+# LCSC 类目 → InvenTree 类别路径映射
+#
+# 顶层 key 是 LCSC 大类；_default 给该大类下的兜底路径；
+# 子项是 LCSC 子类名（与 `additionalProperty` 中的 parentCatalogName/catalogName 一致）。
+#
+# InvenTree 类别会被自动按 path 逐层创建（如果不存在）。
+
+Capacitors:
+  _default: ["Passive", "Capacitors"]
+  Ceramic Capacitors: ["Passive", "Capacitors", "Ceramic Capacitors (MLCC)"]
+  Tantalum Capacitors: ["Passive", "Capacitors", "Tantalum Capacitors"]
+  Aluminum Electrolytic Capacitors: ["Passive", "Capacitors", "Aluminum Electrolytic"]
+  Film Capacitors: ["Passive", "Capacitors", "Film Capacitors"]
+  Trimmer / Variable Capacitors: ["Passive", "Capacitors", "Trimmers"]
+
+Resistors:
+  _default: ["Passive", "Resistors"]
+  "Chip Resistor - Surface Mount": ["Passive", "Resistors", "Chip Resistor - SMD"]
+  "Through Hole Resistors": ["Passive", "Resistors", "Through Hole Resistors"]
+  Resistor Networks & Arrays: ["Passive", "Resistors", "Networks & Arrays"]
+
+Inductors:
+  _default: ["Passive", "Inductors"]
+  "Fixed Inductors": ["Passive", "Inductors", "Fixed Inductors"]
+
+Crystals and Oscillators:
+  _default: ["Timing", "Crystals and Oscillators"]
+  Crystals: ["Timing", "Crystals"]
+  Oscillators: ["Timing", "Oscillators"]
+
+Diodes:
+  _default: ["Active", "Diodes"]
+  Rectifier Diodes: ["Active", "Diodes", "Rectifier"]
+  Schottky Diodes: ["Active", "Diodes", "Schottky"]
+  Zener Diodes: ["Active", "Diodes", "Zener"]
+  TVS Diodes: ["Active", "Diodes", "TVS"]
+
+Transistors:
+  _default: ["Active", "Transistors"]
+  MOSFETs: ["Active", "Transistors", "MOSFETs"]
+  BJTs: ["Active", "Transistors", "BJTs"]
+
+Integrated Circuits:
+  _default: ["Active", "Integrated Circuits"]
+  "Logic ICs": ["Active", "Integrated Circuits", "Logic"]
+  "Microcontrollers": ["Active", "Integrated Circuits", "Microcontrollers"]
+  "Operational Amplifiers": ["Active", "Integrated Circuits", "Op-Amps"]
+  "Voltage Regulators": ["Active", "Power", "Voltage Regulators"]
+
+Optoisolators:
+  _default: ["Active", "Optoisolators"]
+  "Transistor, Photovoltaic Output Optoisolators": ["Active", "Optoisolators", "Phototransistor"]
+
+Connectors:
+  _default: ["Connectors"]
+  "Header Pins": ["Connectors", "Headers"]
+  "USB Connectors": ["Connectors", "USB"]
+  "Terminal Blocks": ["Connectors", "Terminal Blocks"]
+
+# 第二层：Function Type 匹配候选池（针对 IC / Power）
+# 注意：仅当 LCSC 字段含 "Function Type" 时才会触发该匹配
+Power Management:
+  _default: ["Active", "Power Management"]
+Power Supplies:
+  _default: ["Active", "Power"]

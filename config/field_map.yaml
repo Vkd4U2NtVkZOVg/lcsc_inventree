@@ -1,0 +1,52 @@
+# LCSC `additionalProperty[].name` → InvenTree `PartParameterTemplate.name`
+#
+# 顶层 key 是 InvenTree 类别路径的"最后一段"或 LCSC 大类名。
+# `parent: [...]` 表示继承另一个类别的字段映射（顺序：先父后子，子可覆盖父）。
+# value 是 LCSC 字段名的列表，按顺序尝试匹配，第一个存在的字段被使用。
+#
+# 注意：如果同一 LCSC 字段名在多个 chain 中都声明，先出现的 chain 优先。
+
+Base:
+  Tolerance:      [Tolerance]
+  Rated Voltage:  ["Voltage Rating", "Voltage - Rated", "Rated Voltage"]
+  Rated Current:  ["Current Rating", "Rated Current"]
+  Rated Power:    ["Power(Watts)", "Power Rating", "Rated Power"]
+  Package:        [Package]
+  Operating Temperature: [Operating Temperature]
+
+# Passives：基本元件（电阻/电容/电感）共用 Value 字段，按实际类别取第一个存在的
+Passives:
+  parent: [Base]
+  Value: [Resistance, Capacitance, Inductance]
+
+Resistors:
+  parent: [Passives]
+  # Rated Power 已通过 Base 继承，LCSC 字段名是 "Power(Watts)"
+
+Capacitors:
+  parent: [Passives]
+  Rated Voltage:  ["Voltage Rating", "Voltage - Rated"]
+  ESR:            [ESR]
+
+Inductors:
+  parent: [Passives]
+  DC Resistance:  ["DC Resistance (DCR)", "DCR"]
+
+Diodes:
+  parent: [Base]
+  Forward Voltage: ["Voltage - Forward(Vf)", "Vf", "Forward Voltage"]
+  Reverse Voltage: [Reverse Voltage]
+  Forward Current: ["Forward Current(If)", "If", "Forward Current"]
+
+Integrated Circuits:
+  parent: [Base]
+  Function Type:  ["Function Type"]
+  Supply Voltage: ["Supply Voltage", "Vcc"]
+  Operating Temperature: [Operating Temperature]
+
+Optoisolators:
+  parent: [Base]
+  Isolation Voltage: ["Isolation Voltage(Vrms)", "Isolation Voltage"]
+  Current Transfer Ratio: ["Current transfer ratio", "CTR"]
+  Rise Time: [Rise time]
+  Fall Time: [Fall time]
