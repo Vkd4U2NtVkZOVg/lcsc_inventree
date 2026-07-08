@@ -1,0 +1,329 @@
+# 在 Windows 上运行 lcsc2inventree
+
+本文档针对 **Windows 10 / 11**，覆盖安装、配置、运行与故障排查。所有命令同时给出 **PowerShell** 与 **CMD** 两种语法。
+
+---
+
+## 1. 系统要求
+
+| 项目 | 最低 | 推荐 |
+|------|------|------|
+| 操作系统 | Windows 10 1809 (build 17763) | Windows 11 |
+| Python | 3.10 | 3.11 或 3.12 |
+| 架构 | x64 | x64（ARM64 大部分依赖无 wheel） |
+| 网络 | 可访问 `www.lcsc.com` 与你的 InvenTree 实例 | — |
+| 磁盘 | 200 MB（含 venv 与缓存） | — |
+
+> ⚠️ **不推荐 Windows on ARM**：部分二进制 wheel 缺失，需要额外安装 MSVC 工具链。
+>
+> ⚠️ **Python 3.13 暂不推荐**：`inventree-python` 0.23.x 尚未声明兼容；如使用可能需从源码安装。
+
+---
+
+## 2. 安装 Python（如果尚未安装）
+
+建议从 [python.org](https://www.python.org/downloads/windows/) 下载安装包，安装时**务必勾选**：
+
+- ✅ Add Python to PATH
+- ✅ Install py launcher
+
+安装完成后验证：
+
+```powershell
+python --version
+py --version
+```
+
+应输出 `Python 3.10.x` 或更高。
+
+---
+
+## 3. 安装 uv（推荐）
+
+`uv` 是 Rust 写的 pip 替代品，比 `pip` 快 10-100 倍，且能自动管理 venv。
+
+```powershell
+# PowerShell（管理员）
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+安装后**重新打开一个终端**让 PATH 生效，验证：
+
+```powershell
+uv --version
+```
+
+> 备选：不使用 uv，直接用 `pip` / `pipx`，见 §7。
+
+---
+
+## 4. 拉取项目
+
+### 4.1 用 git
+
+```powershell
+cd $HOME\Documents
+git clone <your-repo-url> lcsc2inventree
+cd lcsc2inventree
+```
+
+### 4.2 下载 ZIP
+
+在 GitHub 上点 `Code → Download ZIP`，解压到 `C:\tools\lcsc2inventree\`。
+
+---
+
+## 5. 创建虚拟环境并安装依赖
+
+### 5.1 用 uv（推荐）
+
+```powershell
+cd $HOME\Documents\lcsc2inventree     # 或你的解压路径
+uv venv
+uv pip install -e ".[dev]"
+```
+
+### 5.2 用 pip（备选）
+
+```powershell
+cd $HOME\Documents\lcsc2inventree
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1          # PowerShell
+# 或 .\.venv\Scripts\activate.bat    # CMD
+
+python -m pip install -e ".[dev]"
+```
+
+> ⚠️ PowerShell 首次激活可能报「无法加载脚本，因为在此系统上禁止运行脚本」。**以管理员身份**执行一次：
+> ```powershell
+> Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+> ```
+> 然后重新激活。
+
+### 5.3 验证安装
+
+```powershell
+python -m lcsc2inv --help
+```
+
+应输出 Click 帮助信息。
+
+---
+
+## 6. 配置 `.env`
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+最小必填：
+
+```ini
+INVENTREE_URL=https://inventree.example.com
+INVENTREE_TOKEN=<your-token-here>
+LCSC_CACHE_DIR=%USERPROFILE%\.cache\lcsc2inventree
+```
+
+> 💡 Windows 路径里 `%USERPROFILE%` 等价于 Linux 的 `~`，本工具会自动 `expandvars + expanduser`。也可以写：
+> - 绝对路径：`C:\Users\<you>\.cache\lcsc2inventree`
+> - 带波浪号：`~\.cache\lcsc2inventree`（程序会自动展开）
+
+---
+
+## 7. 第一次运行（dry-run）
+
+```powershell
+$env:DRY_RUN = "true"                    # PowerShell
+# 或 set DRY_RUN=true                   # CMD
+
+python -m lcsc2inv import C28323
+```
+
+预期输出（节选）：
+
+```
+[DRY] C28323  CL21B105KBFNNNE
+┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ name         │ Samsung Electro-Mechanics …    ┃
+┃ category     │ Capacitors/… → Passive/Capaci…┃
+┃ parameters   │ Value=1u; Tolerance=±10%; …   ┃
+└──────────────┴───────────────────────────────┘
+```
+
+取消 dry-run：
+
+```powershell
+Remove-Item Env:\DRY_RUN                  # PowerShell
+# 或 set DRY_RUN=                        # CMD
+```
+
+---
+
+## 8. 运行批量导入
+
+```powershell
+python -m lcsc2inv batch examples\bom.csv
+```
+
+CSV 格式（UTF-8，**不要带 BOM**——用 `notepad` 另存为 `UTF-8` 而不是 `UTF-8 with BOM`）：
+
+```csv
+lcsc_code,quantity,note
+C28323,2000,主电源去耦
+C191386,500,
+```
+
+---
+
+## 9. 常见坑与解决方案
+
+### 9.1 路径分隔符
+
+代码内部统一用 `pathlib.Path`，**用户输入的字符串路径**会自动转换。但**不要**在 `.env` 里写带尾随空格或混合分隔符的路径。
+
+### 9.2 长路径限制（MAX_PATH 260）
+
+如果缓存目录或项目目录很深（比如放在 OneDrive 同步文件夹里），可能触发 `FileNotFoundError`。两种解法：
+
+**方案 A**：把项目放在浅层目录（如 `C:\tools\lcsc2inventree`）。
+
+**方案 B（Win10 1607+）**：启用长路径支持——以管理员身份运行：
+```powershell
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+                 -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+```
+
+### 9.3 编码 / 中文乱码
+
+- **CSV 文件**：务必保存为 UTF-8（无 BOM）。Excel 打开 CSV 默认按 GBK 解码会乱码——可换用 VSCode / Notepad++ 打开。
+- **PowerShell 控制台**：
+  ```powershell
+  $OutputEncoding = [System.Text.Encoding]::UTF8
+  chcp 65001 | Out-Null
+  ```
+- **CMD 控制台**：运行 `chcp 65001` 切到 UTF-8 代码页。
+
+### 9.4 防火墙 / 代理
+
+如果公司网络走代理：
+
+```powershell
+$env:HTTPS_PROXY = "http://proxy.corp.example.com:8080"
+python -m lcsc2inv import C28323
+```
+
+或者在 `.env` 里加：
+
+```ini
+HTTPS_PROXY=http://proxy.corp.example.com:8080
+HTTP_PROXY=http://proxy.corp.example.com:8080
+```
+
+### 9.5 Windows Defender 误报
+
+`python-levenshtein` 这类带 C 扩展的 wheel 解压时可能被 Defender 短暂锁定。如果 `uv pip install` 超时，把项目目录加入 Defender 排除项：
+
+> Windows 安全中心 → 病毒防护 → 管理设置 → 排除项 → 添加排除项 → 文件夹 → 选择 `lcsc2inventree` 目录
+
+### 9.6 行尾符（CRLF vs LF）
+
+`.env`、YAML 配置文件必须是 **LF**。如果出现诡异 YAML 解析错误：
+
+```powershell
+# 用 git 自动转换
+git config core.autocrlf false
+# 或用 dos2unix（通过 scoop 安装：scoop install dos2unix）
+dos2unix config\*.yaml .env
+```
+
+### 9.7 Ctrl+C 中断
+
+Windows 下 `KeyboardInterrupt` 触发略晚，批量跑时按一次 Ctrl+C 即可；不要连按多次否则可能留下未写完的 StockItem（幂等性保证下次重跑会补全）。
+
+### 9.8 `lcsc2inv` 命令无法直接调用
+
+如果你想直接敲 `lcsc2inv` 而不是 `python -m lcsc2inv`，需要激活 venv 后 venv 的 `Scripts\` 已加入 PATH，或者：
+
+```powershell
+uv tool install .                          # 全局安装
+# 或
+pipx install .                             # 备选
+```
+
+安装后任意目录可直接调用 `lcsc2inv import C28323`。
+
+### 9.9 临时文件 / 缓存清理
+
+```powershell
+python -m lcsc2inv cache ls
+python -m lcsc2inv cache clear
+```
+
+---
+
+## 10. 故障排查速查
+
+| 症状 | 可能原因 | 解决 |
+|------|----------|------|
+| `ModuleNotFoundError: inventree` | 没装依赖 / 没激活 venv | `uv pip install -e .` 后重新激活 |
+| `ConnectionError` 抓 LCSC 超时 | 网络问题 / LCSC 限流 | 调高 `.env` 的 `LCSC_REQUEST_INTERVAL=2.0` |
+| `403 Forbidden` | User-Agent 被识别为机器人 | 升级 `.env` 的 `LCSC_USER_AGENT` 为最新 Chrome |
+| `YAML 解析错误` | 文件是 CRLF / 含 BOM | `dos2unix` 转换 |
+| `无法识别为 LCSC C-code` | 输入了中文标点 / 多余空格 | 直接复制 C-code，如 `C28323` |
+| `INVENTREE_TOKEN 错误` | token 过期或 RBAC 不足 | 重新 `curl -u user:pwd /api/user/me/token/` 拿 token |
+| dry-run 输出乱码 | 控制台编码不是 UTF-8 | `chcp 65001` |
+
+---
+
+## 11. 开发 / 运行测试
+
+```powershell
+python -m pytest                         # 跑全部 20 个测试
+python -m pytest tests\test_mapping.py   # 单文件
+python -m pytest -k clean                # 按关键字
+```
+
+依赖已经在 `[dev]` extra 中（含 `pytest`）。
+
+---
+
+## 12. 已知 Windows 限制
+
+1. **并发批量**：当前 CLI 的 `--workers > 1` 实际仍顺序执行（InvenTree SDK 非线程安全）。Windows 上同样如此。
+2. **图片上传**（未来功能）：multipart 上传依赖 `requests-toolbelt`，已在依赖中预留。
+3. **Jupyter Notebook**：可以在 Windows 上跑 `pip install notebook` 但本文档未覆盖。
+
+---
+
+## 13. 一键体检
+
+```powershell
+python -m lcsc2inv doctor
+```
+
+如果所有行都打绿色 ✓，说明：
+
+- Python 与依赖 OK
+- `.env` 配置正确
+- InvenTree API 可达
+- YAML 配置文件能加载
+
+如果报红，按提示修复后重跑。
+
+---
+
+## 附：PowerShell vs CMD 速查
+
+| 操作 | PowerShell | CMD |
+|------|------------|-----|
+| 激活 venv | `.\.venv\Scripts\Activate.ps1` | `.\.venv\Scripts\activate.bat` |
+| 设环境变量 | `$env:X = "y"` | `set X=y` |
+| 取消环境变量 | `Remove-Item Env:\X` | `set X=` |
+| 复制文件 | `Copy-Item a b` | `copy a b` |
+| 设 UTF-8 | `chcp 65001` + `$OutputEncoding=[Text.Encoding]::UTF8` | `chcp 65001` |
+| 跑命令 | `python -m lcsc2inv import C28323` | 同左 |
+
+---
+
+有问题先看 §10 速查表；如果还解决不了，把 `python -m lcsc2inv doctor` 的完整输出贴到 issue。
