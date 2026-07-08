@@ -2,6 +2,8 @@
 
 本文档针对 **Windows 10 / 11**，覆盖安装、配置、运行与故障排查。所有命令同时给出 **PowerShell** 与 **CMD** 两种语法。
 
+> 🌐 **国内立创商城支持**：本工具已适配 `item.szlcsc.com`（深圳主站），详见 [docs/LCSC_CN_VS_INTL.md](LCSC_CN_VS_INTL.md)。两站点对比、URL 差异、ld+json 结构差异都在那篇文档。
+
 ---
 
 ## 1. 系统要求
@@ -10,6 +12,7 @@
 |------|------|------|
 | 操作系统 | Windows 10 1809 (build 17763) | Windows 11 |
 | Python | 3.10 | 3.11 或 3.12 |
+| PowerShell | 5.1（内置） | **PowerShell 7.x**（对 UTF-8 支持更完整） |
 | 架构 | x64 | x64（ARM64 大部分依赖无 wheel） |
 | 网络 | 可访问 `www.lcsc.com` 与你的 InvenTree 实例 | — |
 | 磁盘 | 200 MB（含 venv 与缓存） | — |
@@ -203,6 +206,11 @@ New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
   chcp 65001 | Out-Null
   ```
 - **CMD 控制台**：运行 `chcp 65001` 切到 UTF-8 代码页。
+- **国内立创商城（item.szlcsc.com）输出含中文**：例如类别字段是 `以太网连接器(RJ45 RJ11)`、品牌是 `Ckmtw(灿科盟)`。**如果控制台不是 UTF-8，会显示乱码或问号**。务必先执行上面的 `chcp 65001` 再跑 `lcsc2inv import`。
+- **PowerShell 5.1（旧版 Windows 自带）**：对中文等宽字符渲染有缺陷，建议升级到 PowerShell 7：
+  ```powershell
+  winget install Microsoft.PowerShell
+  ```
 
 ### 9.4 防火墙 / 代理
 
@@ -313,6 +321,30 @@ python -m lcsc2inv doctor
 
 ---
 
+## 14. 国内立创商城（item.szlcsc.com）
+
+如果你在大陆，主要使用国内站：
+
+```powershell
+# 直接传国内站 URL（必须用 numeric id，不是 C-code）
+python -m lcsc2inv import "https://item.szlcsc.com/360864.html" --dry-run
+```
+
+**注意**：国内站 URL 形如 `https://item.szlcsc.com/360864.html`，**不接受 `C28323` 形式的 C-code 直链**（会 404）。如果你的 BOM 来源只有 C-code，建议：
+
+1. 在浏览器登录国内站，搜索 C-code，把跳转后的 numeric URL 录入 CSV
+2. 或者直接用国际版（`www.lcsc.com`），URL 接受 C-code，更省事
+
+国内站的限制（详细对比见 [LCSC_CN_VS_INTL.md](LCSC_CN_VS_INTL.md)）：
+
+- ⚠️ ld+json **不含 `additionalProperty`**：规格参数（电阻值、容值、封装等）拿不到，InvenTree PartParameter 为空
+- ⚠️ 中文类别（如 `以太网连接器(RJ45 RJ11)`）无法匹配 `lcsc_categories.yaml`（英文路径），自动归类失败
+- ⚠️ 阿里云 WAF 较严：缺 `Referer` 会被 403。实测默认配置勉强可用，但批量跑可能触发限流
+
+如果只用国际版，**完全不需要读这一节**——直接跳过。
+
+---
+
 ## 附：PowerShell vs CMD 速查
 
 | 操作 | PowerShell | CMD |
@@ -323,6 +355,16 @@ python -m lcsc2inv doctor
 | 复制文件 | `Copy-Item a b` | `copy a b` |
 | 设 UTF-8 | `chcp 65001` + `$OutputEncoding=[Text.Encoding]::UTF8` | `chcp 65001` |
 | 跑命令 | `python -m lcsc2inv import C28323` | 同左 |
+| 编码（中文输出） | `chcp 65001` + `$OutputEncoding=[Text.Encoding]::UTF8` | `chcp 65001` |
+| 升级 PowerShell | `winget install Microsoft.PowerShell` | 不支持（需手动下载） |
+
+---
+
+## 15. 参考链接
+
+- [docs/LCSC_CN_VS_INTL.md](LCSC_CN_VS_INTL.md) — 国内/国际立创商城差异
+- [README.md](../README.md) — 项目总览
+- [inventree-python 文档](https://github.com/inventree/inventree-python) — InvenTree SDK
 
 ---
 
