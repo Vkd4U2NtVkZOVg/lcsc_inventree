@@ -26,7 +26,12 @@ class PropertyValue(BaseModel):
 
 
 class Offer(BaseModel):
-    """LCSC ld+json 中的 `offers` 对象（库存 + 价格 + 卖家）。"""
+    """LCSC ld+json 中的 `offers` 对象（库存 + 价格 + 卖家）。
+
+    国内版 (item.szlcsc.com) 的 inventoryLevel 是 `QuantitativeValue` 对象：
+        {"@type": "QuantitativeValue", "value": 56588}
+    国际版 (www.lcsc.com) 是裸 int：2000
+    """
 
     url: str | None = None
     price_currency: str = Field("USD", alias="priceCurrency")
@@ -38,14 +43,25 @@ class Offer(BaseModel):
 
     @classmethod
     def from_raw(cls, raw: dict) -> "Offer":
-        seller = raw.get("seller") or {}
+        seller = raw.get("seller")
+        seller_name = None
+        if isinstance(seller, dict):
+            seller_name = seller.get("name")
+        # 兼容 QuantitativeValue 包装（国内版）和裸 int（国际版）
+        inv = raw.get("inventoryLevel")
+        if isinstance(inv, dict):
+            inv = inv.get("value")
+        try:
+            inventory_level = int(inv) if inv is not None else None
+        except (TypeError, ValueError):
+            inventory_level = None
         return cls(
             url=raw.get("url"),
             priceCurrency=raw.get("priceCurrency", "USD"),
             price=raw.get("price"),
             availability=raw.get("availability"),
-            inventoryLevel=raw.get("inventoryLevel"),
-            seller_name=seller.get("name"),
+            inventoryLevel=inventory_level,
+            seller_name=seller_name,
             description=raw.get("description"),
         )
 

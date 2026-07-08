@@ -35,7 +35,10 @@ from lcsc2inv.lcsc_models import Brand, LCSCPart, Offer, PropertyValue, SubjectO
 logger = logging.getLogger(__name__)
 
 LCSC_PRODUCT_URL_TEMPLATE = "https://www.lcsc.com/product-detail/{code}.html"
+# 国内立创商城（item.szlcsc.com）使用数字内部 ID，不接受 C-code 直链
+LCSC_CN_PRODUCT_URL_TEMPLATE = "https://item.szlcsc.com/{numeric_id}.html"
 LCSC_URL_PATTERN = re.compile(r"/product-detail/C(\d+)\.html", re.IGNORECASE)
+LCSC_CN_URL_PATTERN = re.compile(r"item\.szlcsc\.com/(\d+)\.html", re.IGNORECASE)
 LDJSON_PATTERN = re.compile(
     r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
     re.DOTALL | re.IGNORECASE,
@@ -49,6 +52,10 @@ NEXTDATA_PATTERN = re.compile(
 def parse_lcsc_code(value: str) -> str:
     """从 C-code 字符串或 LCSC URL 中抽出 C-code。
 
+    支持两种 URL 模式：
+    - 国际版：`https://www.lcsc.com/product-detail/C28323.html` → `C28323`
+    - 国内版：`https://item.szlcsc.com/360864.html` → 数字 ID（不是 C-code）
+
     >>> parse_lcsc_code('C28323')
     'C28323'
     >>> parse_lcsc_code('https://www.lcsc.com/product-detail/C28323.html')
@@ -59,18 +66,41 @@ def parse_lcsc_code(value: str) -> str:
     if not value:
         raise ValueError("input is empty")
     v = value.strip()
+    # 国际版 C-code URL
     m = LCSC_URL_PATTERN.search(v)
     if m:
         return f"C{m.group(1)}"
+    # 国内版数字 URL 也接受（保留为 "CN:<id>" 形式供调用方识别）
+    m = LCSC_CN_URL_PATTERN.search(v)
+    if m:
+        return f"CN:{m.group(1)}"
     v = v.upper().replace(" ", "")
     # 容许前缀分隔符：`C-191386`、`C.191386`、`C/191386`
     v = re.sub(r"^C[-./\\]+", "C", v)
     if re.fullmatch(r"C\d+", v):
         return v
+    # 裸数字也接受（视作国内版 numeric id）
+    if re.fullmatch(r"\d+", v):
+        return f"CN:{v}"
     raise ValueError(f"无法识别为 LCSC C-code 或商品 URL: {value!r}")
 
 
-def product_url(code: str) -> str:
+def product_url(code: str, base: str = "www.lcsc.com") -> str:
+    """根据 code 构造商品详情 URL。
+
+    `CN:<id>` 形式走国内站，其它走国际站。
+    """
+    if code.startswith("CN:"):
+        numeric_id = code[3:]
+        if "szlcsc.com" in base:
+            return f"https://{base.rstrip('/')}/{numeric_id}.html"
+        return LCSC_CN_PRODUCT_URL_TEMPLATE.format(numeric_id=numeric_id)
+    if "szlcsc.com" in base:
+        # 国内站 URL 需要 numeric_id，但 code 是 C-code，无法直链
+        raise ValueError(
+            f"国内站 {base} 不支持 C-code 直链，需要先通过搜索接口把 {code} 转为 numeric id。"
+            f"当前 lcsc2inventree 不支持该转换；建议使用国际站 www.lcsc.com。"
+        )
     return LCSC_PRODUCT_URL_TEMPLATE.format(code=code)
 
 
@@ -224,7 +254,20 @@ def _from_nextdata(nd: dict[str, Any], *, page_url: str | None) -> LCSCPart:
 def load_fixture(path: str | Path) -> LCSCPart:
     """从本地文件读取 HTML 并解析（用于测试 / 离线运行）。"""
     p = Path(path)
-    return parse_ldjson(p.read_text(encoding="utf-8"), page_url=product_url(parse_lcsc_code(p.stem)))
+    html = p.read_text(encoding="utf-8")
+    # fixture 文件名约定：
+    #   C28323.html         → 国际版 C-code
+    #   CN_360864.html      → 国内版 numeric id（前缀 CN_）
+    #   cn_360864.html      → 同上
+    stem = p.stem
+    if stem.upper().startswith("CN_") or stem.lower().startswith("cn"):
+        # 去掉前缀，取数字
+        numeric = re.sub(r"^[Cc][Nn][_-]?", "", stem)
+        page_url = LCSC_CN_PRODUCT_URL_TEMPLATE.format(numeric_id=numeric)
+        # 从页面抽 sku 作主 ID
+        return parse_ldjson(html, page_url=page_url)
+    page_url = product_url(parse_lcsc_code(stem))
+    return parse_ldjson(html, page_url=page_url)
 
 
 # ---------------------------------------------------------------------------

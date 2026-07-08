@@ -56,6 +56,8 @@ uv pip install -e ".[dev]"
 ```
 
 > 📘 **Windows 用户**：请参阅 [docs/WINDOWS.md](docs/WINDOWS.md) — 涵盖 PowerShell/CMD 区别、UTF-8、路径分隔符、长路径限制等坑。
+>
+> 🌐 **国内立创商城（item.szlcsc.com）**：请参阅 [docs/LCSC_CN_VS_INTL.md](docs/LCSC_CN_VS_INTL.md) — 国内/国际版差异、URL 模式、ld+json 结构差异与限制。
 
 ## 配置
 
