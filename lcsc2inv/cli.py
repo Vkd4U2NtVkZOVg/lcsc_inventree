@@ -142,6 +142,8 @@ _dry_run_option = click.option(
 @click.option("--qty", type=int, default=None, help="建 StockItem 时使用的数量")
 @click.option("--stock/--no-stock", default=False, help="建 StockItem（默认不建）")
 @click.option("--note", default=None, help="附加备注写入 Part.notes")
+@click.option("--create-missing-category/--no-create-missing-category", default=False,
+              help="LCSC 分类本地不存在时自动创建（默认不创建，落在 __uncategorized__）")
 @click.pass_context
 def import_cmd(
     ctx: click.Context,
@@ -151,11 +153,13 @@ def import_cmd(
     qty: int | None,
     stock: bool,
     note: str | None,
+    create_missing_category: bool,
 ) -> None:
     """导入单个 LCSC 商品（如 C28323 或 https://www.lcsc.com/product-detail/C28323.html）。
 
     默认只创建器件，不建 StockItem（库存由用户手工管理）。
     用 --stock 可选建库存。
+    用 --create-missing-category 允许自动创建本地不存在的 LCSC 分类。
     """
     _common_dry_run(ctx, dry_run)
     settings = get_settings()
@@ -180,8 +184,10 @@ def import_cmd(
         fetcher=fetcher,  # 复用限速（图片下载与 HTML 抓取共享 1 req/s）
         force_image_upload=update,  # --update 时强制覆盖图片
     )
-    result = writer.upsert_part(part, options=opts)
-    _print_result(part.sku, result)
+    # 传给 writer.upsert_part 的 options 需要包装成包含 create_missing_category 的 dict
+    # 目前 WriteOptions 没这个字段，我们直接调用 upsert_part 并在内部处理
+    result = writer.upsert_part_with_category(part, options=opts, create_missing_category=create_missing_category)
+    _print_result(code, result)
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +200,8 @@ def import_cmd(
 @click.argument("csv_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--update/--no-update", default=False)
 @click.option("--stock/--no-stock", default=False, help="建 StockItem（默认不建）")
+@click.option("--create-missing-category/--no-create-missing-category", default=False,
+              help="LCSC 分类本地不存在时自动创建（默认不创建）")
 @click.option("--workers", type=int, default=1, help="并发 worker 数（默认 1 即顺序）")
 @click.pass_context
 def batch(
@@ -202,12 +210,14 @@ def batch(
     csv_path: Path,
     update: bool,
     stock: bool,
+    create_missing_category: bool,
     workers: int,
 ) -> None:
     """从 CSV 批量导入。CSV 必须有 lcsc_code 列，可选 quantity / note 列。
 
     默认只创建器件，不建 StockItem（库存由用户手工管理）。
     用 --stock 可选建库存。
+    用 --create-missing-category 允许自动创建本地不存在的 LCSC 分类。
     """
     _common_dry_run(ctx, dry_run)
     settings = get_settings()
@@ -230,10 +240,10 @@ def batch(
     api = _connect_inventree(token=ctx.obj.get("token"))
     writer = InvenTreeWriter(api, settings)
     if workers > 1:
-        _run_batch_threaded(writer, rows, fetcher, update, no_stock, workers)
+        _run_batch_threaded(writer, rows, fetcher, update, stock, create_missing_category, workers)
     else:
         for r in rows:
-            _import_one(writer, fetcher, r, update, stock)
+            _import_one(writer, fetcher, r, update, stock, create_missing_category)
 
 
 def _import_one(
@@ -242,6 +252,7 @@ def _import_one(
     row: dict,
     update: bool,
     stock: bool,
+    create_missing_category: bool = False,
 ) -> None:
     code = row["lcsc_code"]
     qty = int(row["quantity"]) if row.get("quantity") else None
@@ -259,7 +270,7 @@ def _import_one(
         fetcher=fetcher,
         force_image_upload=update,
     )
-    result = writer.upsert_part(part, options=opts)
+    result = writer.upsert_part(part, options=opts, create_missing_category=create_missing_category)
     _print_result(code, result)
 
 
@@ -269,6 +280,7 @@ def _run_batch_threaded(
     fetcher: Fetcher,
     update: bool,
     stock: bool,
+    create_missing_category: bool,
     workers: int,
 ) -> None:
     """简化并发：多 worker 各自 new 一个 fetcher/writer 不可行（writer 共享 API）。"""

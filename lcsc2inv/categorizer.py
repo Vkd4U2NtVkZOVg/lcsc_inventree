@@ -113,8 +113,13 @@ def _function_match(part: LCSCPart, all_paths: list[list[str]]) -> CategoryMatch
     )
 
 
-def _fuzzy_match(part: LCSCPart, all_paths: list[list[str]]) -> CategoryMatch:
-    """兜底：对 LCSC 大类名（如 'Resistors'）做 partial_ratio 匹配。"""
+def _fuzzy_match(part: LCSCPart, all_paths: list[list[str]], *, create_missing_category: bool = False) -> CategoryMatch:
+    """兜底：对 LCSC 大类名（如 'Resistors'）做 partial_ratio 匹配。
+
+    Args:
+        create_missing_category: True 时，如果 LCSC 分类本地不存在，返回 "__create:<path>" 格式，
+            表示调用方应创建该分类。
+    """
     ratio_limit = get_settings().category_match_ratio_limit
     candidates: list[tuple[str, int]] = []
     haystack = part.category_top or part.category or part.mpn or part.sku
@@ -136,6 +141,28 @@ def _fuzzy_match(part: LCSCPart, all_paths: list[list[str]]) -> CategoryMatch:
             score=best_score,
             candidates=candidates[:5],
         )
+    # 模糊匹配失败：尝试用 LCSC 的原始分类路径
+    if create_missing_category and part.category:
+        # LCSC category 通常是 "Top/Sub" 格式，如 "Inductors, Coils, Chokes" 或 "Capacitors/Ceramic Capacitors"
+        # 尝试按 "/" 分割，如果有多段则用第一段作为 top
+        segments = [s.strip() for s in part.category.split("/")]
+        top = segments[0] if segments else part.category
+        logger.warning(
+            "分类模糊匹配失败：LCSC=%s best=%s limit=%s -> 将创建 InvenTree 分类 '%s'",
+            haystack,
+            best_score,
+            ratio_limit,
+            top,
+        )
+        # 返回特殊格式 "__create:<path>"，inventree_writer 会解析并创建
+        # 顶层用 LCSC 的 category_top，其余段拼成完整路径
+        lcsc_path = part.category.split("/")
+        return CategoryMatch(
+            category_path=f"__create:{part.category}",
+            source="create-missing",
+            score=best_score,
+            candidates=candidates[:5],
+        )
     logger.warning(
         "分类模糊匹配失败：LCSC=%s best=%s limit=%s",
         haystack,
@@ -150,8 +177,13 @@ def _fuzzy_match(part: LCSCPart, all_paths: list[list[str]]) -> CategoryMatch:
     )
 
 
-def match(part: LCSCPart) -> CategoryMatch:
-    """对 LCSC 商品做三层匹配，返回最佳 `CategoryMatch`。"""
+def match(part: LCSCPart, *, create_missing_category: bool = False) -> CategoryMatch:
+    """对 LCSC 商品做三层匹配，返回最佳 `CategoryMatch`。
+
+    Args:
+        create_missing_category: True 时，本地无匹配的 LCSC 分类会返回 "__create:<path>" 格式，
+            表示调用方应创建该分类。
+    """
     direct_map = _load_direct_map()
     all_paths = _all_paths_from_yaml()
 
@@ -169,4 +201,4 @@ def match(part: LCSCPart) -> CategoryMatch:
         return fn
 
     # Tier 3: fuzzy
-    return _fuzzy_match(part, all_paths)
+    return _fuzzy_match(part, all_paths, create_missing_category=create_missing_category)

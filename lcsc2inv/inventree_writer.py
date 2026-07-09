@@ -126,14 +126,20 @@ class InvenTreeWriter:
         part: LCSCPart,
         *,
         options: WriteOptions | None = None,
+        create_missing_category: bool = False,
     ) -> WriteResult:
-        """将一个 LCSCPart 完整写入 InvenTree。"""
+        """将一个 LCSCPart 完整写入 InvenTree。
+
+        Args:
+            create_missing_category: True 时，LCSC 分类在 InvenTree 不存在则自动创建。
+        """
         opts = options or WriteOptions()
         result = WriteResult()
         if opts.dry_run:
             opts.create_stock = False  # dry-run 永远不建 StockItem
         try:
-            cat_match = categorizer_match(part)
+            # 使用 create_missing_category 参数调用 categorizer
+            cat_match = categorizer_match(part, create_missing_category=create_missing_category)
             cat_pk = self._ensure_category(cat_match, dry_run=opts.dry_run)
             if cat_pk is None and cat_match.category_path != "__uncategorized__":
                 result.errors.append(f"无法创建类别 {cat_match.category_path}")
@@ -230,6 +236,37 @@ class InvenTreeWriter:
     # ---- category --------------------------------------------------------
 
     def _ensure_category(self, match: CategoryMatch, *, dry_run: bool) -> int | None:
+        # 处理 "__create:<path>" 格式：LCSC 分类本地不存在，需要创建
+        if match.category_path.startswith("__create:"):
+            raw_path = match.category_path[len("__create:"):]
+            logger.info("创建缺失的 InvenTree 分类: %s (来自 LCSC)", raw_path)
+            if dry_run:
+                logger.info("[DRY] 创建分类: %s", raw_path)
+                return None
+            # 逐层创建
+            parent_pk: int | None = None
+            pk: int | None = None
+            for segment in raw_path.split("/"):
+                segment = segment.strip()
+                if not segment:
+                    continue
+                key = f"{parent_pk or ''}/{segment}" if parent_pk else segment
+                if key in self._category_cache:
+                    pk = self._category_cache[key]
+                    parent_pk = pk
+                    continue
+                pk = self._get_category_by_name(segment, parent_pk)
+                if pk is None:
+                    cat = PartCategory.create(
+                        self.api,
+                        {"name": segment, "description": "auto-created by lcsc2inventree from LCSC",
+                         "parent": parent_pk},
+                    )
+                    pk = cat.pk
+                self._category_cache[key] = pk
+                parent_pk = pk
+            return pk
+
         if match.category_path == "__uncategorized__":
             logger.warning("[%s] 未匹配到分类；落到 Uncategorized", match.category_path)
             return None
