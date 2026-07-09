@@ -146,12 +146,14 @@ def to_part_notes(
 ) -> str:
     """构造 Part.notes Markdown 内容（包含 datasheet + 来源 + 可选 BOM 备注）。"""
     lines: list[str] = []
+    # InvenTree 1.2.6 的 notes 字段拒绝任何 HTML 标签（包括 markdown autolink `<url>`），
+    # 所以只能用 `[text](url)` 这种纯 markdown 形式。
     if part.datasheet_url_resolved:
-        lines.append(f"- **Datasheet**: <{part.datasheet_url_resolved}>")
+        lines.append(f"- **Datasheet**: [link]({part.datasheet_url_resolved})")
     if part.page_url:
-        lines.append(f"- **LCSC**: <{part.page_url}>")
+        lines.append(f"- **LCSC**: [link]({part.page_url})")
     if part.image_urls:
-        lines.append(f"- **Image**: <{part.image_urls[0]}>")
+        lines.append(f"- **Image**: [link]({part.image_urls[0]})")
     if part.offer and part.offer.inventory_level is not None:
         lines.append(f"- **LCSC stock**: {part.offer.inventory_level}")
     if quantity is not None:

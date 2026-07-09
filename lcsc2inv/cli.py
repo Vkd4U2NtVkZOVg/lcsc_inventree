@@ -50,7 +50,8 @@ def _connect_inventree(token: str | None = None):
     s = get_settings()
     if not s.inventree_url:
         raise click.ClickException("INVENTREE_URL 未设置（请复制 .env.example → .env 并填写）")
-    kwargs: dict = {"server": s.inventree_url}
+    # inventree-python 0.14+ 把参数名从 server 改成了 host；这里兼容两个版本
+    kwargs: dict = {"host": s.inventree_url}
     if token or s.inventree_token:
         kwargs["token"] = token or s.inventree_token
     elif s.inventree_username and s.inventree_password:
@@ -60,12 +61,12 @@ def _connect_inventree(token: str | None = None):
         raise click.ClickException(
             "需要 INVENTREE_TOKEN 或 INVENTREE_USERNAME/INVENTREE_PASSWORD"
         )
-    api = InvenTreeAPI(**kwargs)
+    # 旧版本用 server=；如果传 host= 报 unexpected kwarg，则回退
     try:
-        api.test_auth()  # SDK 早期版本可能没有此方法
-    except AttributeError:
-        # 退化为简单地 GET 一下 /api/
-        pass
+        api = InvenTreeAPI(**kwargs)
+    except TypeError:
+        kwargs = {("server" if k == "host" else k): v for k, v in kwargs.items()}
+        api = InvenTreeAPI(**kwargs)
     return api
 
 
@@ -139,7 +140,7 @@ _dry_run_option = click.option(
 @click.argument("code_or_url")
 @click.option("--update/--no-update", default=False, help="强制更新已存在 Part 的描述/备注")
 @click.option("--qty", type=int, default=None, help="建 StockItem 时使用的数量")
-@click.option("--no-stock", is_flag=True, help="不建 StockItem")
+@click.option("--stock/--no-stock", default=False, help="建 StockItem（默认不建）")
 @click.option("--note", default=None, help="附加备注写入 Part.notes")
 @click.pass_context
 def import_cmd(
@@ -148,10 +149,14 @@ def import_cmd(
     code_or_url: str,
     update: bool,
     qty: int | None,
-    no_stock: bool,
+    stock: bool,
     note: str | None,
 ) -> None:
-    """导入单个 LCSC 商品（如 C28323 或 https://www.lcsc.com/product-detail/C28323.html）。"""
+    """导入单个 LCSC 商品（如 C28323 或 https://www.lcsc.com/product-detail/C28323.html）。
+
+    默认只创建器件，不建 StockItem（库存由用户手工管理）。
+    用 --stock 可选建库存。
+    """
     _common_dry_run(ctx, dry_run)
     settings = get_settings()
     code = parse_lcsc_code(code_or_url)
@@ -169,9 +174,11 @@ def import_cmd(
     writer = InvenTreeWriter(api, settings)
     opts = WriteOptions(
         update_existing=update,
-        create_stock=not no_stock,
+        create_stock=stock,  # --stock 才建库存（默认 False）
         quantity=qty,
         extra_note=note,
+        fetcher=fetcher,  # 复用限速（图片下载与 HTML 抓取共享 1 req/s）
+        force_image_upload=update,  # --update 时强制覆盖图片
     )
     result = writer.upsert_part(part, options=opts)
     _print_result(part.sku, result)
@@ -186,7 +193,7 @@ def import_cmd(
 @_dry_run_option
 @click.argument("csv_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--update/--no-update", default=False)
-@click.option("--no-stock", is_flag=True)
+@click.option("--stock/--no-stock", default=False, help="建 StockItem（默认不建）")
 @click.option("--workers", type=int, default=1, help="并发 worker 数（默认 1 即顺序）")
 @click.pass_context
 def batch(
@@ -194,10 +201,14 @@ def batch(
     dry_run: bool | None,
     csv_path: Path,
     update: bool,
-    no_stock: bool,
+    stock: bool,
     workers: int,
 ) -> None:
-    """从 CSV 批量导入。CSV 必须有 lcsc_code 列，可选 quantity / note 列。"""
+    """从 CSV 批量导入。CSV 必须有 lcsc_code 列，可选 quantity / note 列。
+
+    默认只创建器件，不建 StockItem（库存由用户手工管理）。
+    用 --stock 可选建库存。
+    """
     _common_dry_run(ctx, dry_run)
     settings = get_settings()
     rows = _read_csv(csv_path)
@@ -222,7 +233,7 @@ def batch(
         _run_batch_threaded(writer, rows, fetcher, update, no_stock, workers)
     else:
         for r in rows:
-            _import_one(writer, fetcher, r, update, no_stock)
+            _import_one(writer, fetcher, r, update, stock)
 
 
 def _import_one(
@@ -230,7 +241,7 @@ def _import_one(
     fetcher: Fetcher,
     row: dict,
     update: bool,
-    no_stock: bool,
+    stock: bool,
 ) -> None:
     code = row["lcsc_code"]
     qty = int(row["quantity"]) if row.get("quantity") else None
@@ -242,9 +253,11 @@ def _import_one(
         return
     opts = WriteOptions(
         update_existing=update,
-        create_stock=not no_stock,
+        create_stock=stock,  # --stock 才建库存（默认 False）
         quantity=qty,
         extra_note=note,
+        fetcher=fetcher,
+        force_image_upload=update,
     )
     result = writer.upsert_part(part, options=opts)
     _print_result(code, result)
@@ -255,7 +268,7 @@ def _run_batch_threaded(
     rows: list[dict],
     fetcher: Fetcher,
     update: bool,
-    no_stock: bool,
+    stock: bool,
     workers: int,
 ) -> None:
     """简化并发：多 worker 各自 new 一个 fetcher/writer 不可行（writer 共享 API）。"""
@@ -284,9 +297,16 @@ def _print_result(code: str, result: WriteResult) -> None:
         console.print(f"[red]{code}: 失败 — {msg}[/red]")
         return
     created = ", ".join(k for k, v in result.created.items() if v)
+    # 图片状态：上传成功 / 跳过原因
+    if result.image_uploaded:
+        img_state = "[green]image: uploaded[/green]"
+    elif result.image_skipped_reason:
+        img_state = f"[dim]image: skipped ({result.image_skipped_reason})[/dim]"
+    else:
+        img_state = "[dim]image: n/a[/dim]"
     console.print(
         f"[green]{code}: OK[/green]  {result.summary()}  "
-        f"{('[created: ' + created + ']') if created else ''}"
+        f"{('[created: ' + created + ']') if created else ''}  {img_state}"
     )
 
 

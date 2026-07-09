@@ -9,8 +9,10 @@
 - 🔍 输入 LCSC C-code（如 `C28323`）或商品 URL，自动从商品页 `ld+json` 抽取字段
 - 🏷️ 三层自动分类匹配（直接映射 → Function Type → 模糊匹配），无须人工指定
 - 📊 字段映射（YAML 驱动）+ 智能单位清洗（`10nF (X7R)`、`10kOhms`、尺寸归一化…）
+- 🖼️ **自动上传图片**（`image_urls[0]` → `Part.image`），重复运行跳过（幂等），`--update` 强制重传
+- 📦 **批量导入**：CSV 一列 C-code 即可
+- 📦 **库存管理**：默认不建 StockItem（只建器件），`--stock` 选建库存；库存建议由用户手工管理
 - ♻️ **幂等写入**（以 LCSC C-code 作为 IPN），重复执行安全
-- 📦 批量导入：CSV 一列 C-code 即可
 - 🛡️ 本地缓存（默认 7 天）+ 速率限制 + 失败重试
 
 ## 数据流
@@ -25,6 +27,13 @@ LCSC 商品页 ─(requests 解析 ld+json)─► LCSCPart
                                     + PriceBreaks + Parameters + 可选 StockItem)
 ```
 
+## 默认行为
+
+- **StockItem**：默认不建（只建器件），用 `--stock` 选建库存；建议由用户手工管理
+- **PartParameter**：InvenTree 1.2.6+ 与 SDK 不兼容时会跳过（不影响 Part/SupplierPart 写入）
+- **图片上传**：默认开启；重复运行跳过；`LCSC_UPLOAD_IMAGE=false` 关闭
+- **LCSC_BASE_URL**：默认国际版 (`www.lcsc.com`)；国内版需设置 `LCSC_BASE_URL=item.szlcsc.com`
+
 ## 字段映射
 
 | LCSC 字段 | InvenTree 目标 |
@@ -38,7 +47,7 @@ LCSC 商品页 ─(requests 解析 ld+json)─► LCSCPart
 | `offers.price` | `SupplierPriceBreak` |
 | `offers.inventoryLevel` | （可选）`StockItem.quantity` |
 | `subjectOf.url` | `Part.notes` Markdown |
-| `image[0]` | `Part.image` 上传 |
+| `image[0]` | `Part.image` 上传（自动幂等跳过；`LCSC_UPLOAD_IMAGE=false` 关闭） |
 
 ## 安装
 
@@ -93,8 +102,23 @@ C146404,,
 ```
 
 ```bash
+# 默认只建器件，不建 StockItem（库存由用户手工管理）
 lcsc2inv batch examples/bom.csv
-lcsc2inv batch bom.csv --workers 4 --skip-stock
+
+# 需建库存？加 --stock
+lcsc2inv batch bom.csv --stock --workers 4
+```
+
+### StockItem 管理
+
+```bash
+# 导入时默认不建 StockItem
+lcsc2inv import C28323
+
+# 需要建库存？加 --stock 和 --qty
+lcsc2inv import C28323 --stock --qty 1000
+
+# 在 InvenTree Web UI 中可以随时手动添加 StockItem（推荐）
 ```
 
 ### 健康检查

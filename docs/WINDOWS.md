@@ -249,7 +249,26 @@ dos2unix config\*.yaml .env
 
 Windows 下 `KeyboardInterrupt` 触发略晚，批量跑时按一次 Ctrl+C 即可；不要连按多次否则可能留下未写完的 StockItem（幂等性保证下次重跑会补全）。
 
-### 9.8 `lcsc2inv` 命令无法直接调用
+### 9.8 StockItem 管理
+
+默认行为：**只建器件，不建 StockItem**。
+
+- `lcsc2inv import C28323` → 只建 Part/MfrPart/SupPart，**不建 StockItem**
+- `lcsc2inv import C28323 --stock --qty 1000` → 建 StockItem.quantity=1000
+- 批量导入 `lcsc2inv batch bom.csv` → 同上，默认不建 StockItem
+
+**推荐做法**：用工具管理器件数据，库存由用户在 InvenTree Web UI 中手工管理（更灵活）。
+
+### 9.9 图片上传
+
+- 默认开启：`LCSC_UPLOAD_IMAGE=true`（`.env` 中可关闭）
+- 幂等：Part 已有图片则跳过；`--update` 强制重传
+- 缓存位置：`<cache_dir>/images/<C-code>.jpg`
+- Windows 注意：Defender 误报（临时 .jpg 会立即删除），长路径（缓存目录建议浅层）
+
+详情见 README.md "图片上传" 小节。
+
+### 9.10 `lcsc2inv` 命令无法直接调用
 
 如果你想直接敲 `lcsc2inv` 而不是 `python -m lcsc2inv`，需要激活 venv 后 venv 的 `Scripts\` 已加入 PATH，或者：
 
@@ -321,7 +340,44 @@ python -m lcsc2inv doctor
 
 ---
 
-## 14. 国内立创商城（item.szlcsc.com）
+## 14. 图片上传
+
+LCSC 商品页通常有 front/back 等多张图片（如 `https://assets.lcsc.com/images/lcsc/.../C28323_front.jpg`），工具会自动将 `image_urls[0]` 上传到 InvenTree `Part.image` 字段。
+
+### 幂等行为
+
+- **首次导入**：下载图片 → 上传 → 缓存到 `<cache_dir>/images/C28323.jpg`
+- **后续导入**：发现 Part 已有 `Part.image`，跳过下载/上传
+- **强制重传**：`--update` 标志会强制重新下载并上传图片
+
+### 配置
+
+`.env` 中设置：
+
+```ini
+LCSC_UPLOAD_IMAGE=true   # 默认 true；设为 false 关闭上传
+```
+
+### Windows 注意事项
+
+- **Defender 误报**：图片缓存文件是临时 `.jpg`，会立即删除；如误报可把项目目录加入排除项
+- **长路径**：缓存目录 `<cache_dir>/images/` 默认在用户目录下；若 `.cache` 很深，Windows MAX_PATH 可能限制，建议把 `LCSC_CACHE_DIR` 设为浅层路径（如 `C:\tools\lcsc_cache\`）
+- **UTF-8 路径**：缓存目录支持中文路径；推荐用 `%USERPROFILE%` 或 `~` 表示用户目录（程序自动展开）
+
+### 查看已上传图片
+
+```powershell
+# 确认 Part 有图片字段
+python -m lcsc2inv import C28323 --dry-run
+# 输出应包含 [DRY] 提示，且终端显示图片 URL
+
+# 在 InvenTree Web UI 中：
+# Parts → 找到对应 Part → 查看 image/thumbnail 字段
+```
+
+---
+
+## 15. 国内立创商城（item.szlcsc.com）
 
 如果你在大陆，主要使用国内站：
 

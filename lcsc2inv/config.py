@@ -58,6 +58,8 @@ class Settings:
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
+    # 图片上传：默认开启。Part 已 image 则跳过；--update 强制重传
+    lcsc_upload_image: bool = True
 
     # 行为开关
     category_match_ratio_limit: int = 75
@@ -99,6 +101,7 @@ def get_settings(*, force_reload: bool = False) -> Settings:
         ),
         category_match_ratio_limit=int(os.getenv("CATEGORY_MATCH_RATIO_LIMIT", "75")),
         dry_run=_to_bool(os.getenv("DRY_RUN"), False),
+        lcsc_upload_image=_to_bool(os.getenv("LCSC_UPLOAD_IMAGE"), True),
     )
     _cached = s
     return s

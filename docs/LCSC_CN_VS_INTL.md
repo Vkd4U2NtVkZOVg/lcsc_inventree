@@ -70,7 +70,20 @@ session.headers.update({
 
 并考虑登录态 cookie（需在浏览器登录后导出）。
 
-### 4. 缓存与代码兼容性
+### 4. 图片上传
+
+国内站图片 URL 格式：
+
+```text
+alimg.szlcsc.com/.../C28323_front.jpg
+```
+
+lcsc2inventree 的 `Fetcher.download_image()` 会自动从国内站下载并上传到 InvenTree，但有以下注意：
+
+- ⚠️ **国内站 ld+json 缺少 `image` 字段**：实测部分商品页 `ld+json` 不含 `image` 或仅含少量图片（front 一张），导致 `image_urls` 为空或仅 1-2 张
+- ⚠️ **图片域名不同**：`assets.lcsc.com`（国际） vs `alimg.szlcsc.com`（国内），`Fetcher.download_image()` 已适配不同域名，但需网络可达
+
+### 5. 缓存与代码兼容性
 
 - 解析器自动兼容两种 ld+json 结构
 - 缓存文件按 `{sku}.json` 命名，国内站的 `CN:360864` 会缓存为 `CN_360864.json`（避免和 `C360864` 冲突）

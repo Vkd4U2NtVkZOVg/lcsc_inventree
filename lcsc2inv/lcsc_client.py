@@ -395,6 +395,70 @@ class Fetcher:
         # 不应该到这里，但保险起见
         raise LcscFetchError(f"多次重试失败 url={url} last={last_exc}")
 
+    # -- image download -------------------------------------------------
+
+    def _image_cache_path(self, code: str) -> Path:
+        d = self.settings.cache_dir_path / "images"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / f"{code}.jpg"
+
+    def _image_meta_path(self, code: str) -> Path:
+        return self._image_cache_path(code).with_suffix(".meta.json")
+
+    def _image_cache_hit(self, code: str) -> Path | None:
+        """图片缓存命中且未过期：返回本地路径；否则 None。"""
+        if not self.settings.lcsc_cache_enabled:
+            return None
+        img = self._image_cache_path(code)
+        meta = self._image_meta_path(code)
+        if not img.exists() or not meta.exists():
+            return None
+        try:
+            m = json.loads(meta.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+        age_days = (time.time() - float(m.get("fetched_at", 0))) / 86400
+        if age_days > self.settings.lcsc_cache_ttl_days:
+            return None
+        return img
+
+    def download_image(self, code: str, url: str) -> Path:
+        """下载 LCSC 商品图（image_urls[0]）到本地缓存并返回路径。
+
+        复用 `_throttle()`（共享 1 req/s 限速）+ tenacity 重试。
+        缓存文件：`<cache_dir>/images/<code>.jpg` + `<code>.meta.json`。
+        调用方负责使用后清理本地文件（典型场景：upload 完即 unlink）。
+        """
+        cached = self._image_cache_hit(code)
+        if cached is not None:
+            return cached
+
+        last_exc: Exception | None = None
+        for attempt in Retrying(
+            stop=stop_after_attempt(self.settings.lcsc_max_retries),
+            wait=wait_exponential(multiplier=1.0, min=1.0, max=8.0),
+            retry=retry_if_exception_type((requests.RequestException, LcscFetchError)),
+            reraise=True,
+        ):
+            with attempt:
+                self._throttle()
+                try:
+                    resp = self.session.get(url, timeout=20)
+                except requests.RequestException as exc:
+                    last_exc = exc
+                    raise
+                if resp.status_code in (403, 429):
+                    raise LcscFetchError(f"图片下载被限流 HTTP {resp.status_code} url={url}")
+                if resp.status_code >= 400:
+                    raise LcscFetchError(f"图片下载 HTTP {resp.status_code} url={url}")
+                img_path = self._image_cache_path(code)
+                img_path.write_bytes(resp.content)
+                self._image_meta_path(code).write_text(
+                    json.dumps({"fetched_at": time.time()}), encoding="utf-8"
+                )
+                return img_path
+        raise LcscFetchError(f"图片多次重试失败 url={url} last={last_exc}")
+
 
 def default_fetcher(settings: Settings | None = None) -> Fetcher:
     return Fetcher(settings=settings or get_settings())

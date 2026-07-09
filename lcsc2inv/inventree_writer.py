@@ -43,6 +43,7 @@ from inventree.stock import StockItem
 
 from lcsc2inv.categorizer import CategoryMatch, match as categorizer_match
 from lcsc2inv.config import Settings, get_settings
+from lcsc2inv.lcsc_client import Fetcher, LcscFetchError, default_fetcher
 from lcsc2inv.lcsc_models import LCSCPart
 from lcsc2inv.mapping import to_inventree_parameters, to_part_notes
 
@@ -64,6 +65,10 @@ class WriteResult:
     manufacturer_part_pk: int | None = None
     supplier_part_pk: int | None = None
     stock_item_pk: int | None = None
+    # 图片上传状态
+    image_uploaded: bool = False
+    image_url: str | None = None
+    image_skipped_reason: str | None = None
     created: dict[str, bool] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
@@ -74,7 +79,8 @@ class WriteResult:
         return (
             f"part#{self.part_pk} mfr#{self.manufacturer_pk} "
             f"sup#{self.supplier_pk} mp#{self.manufacturer_part_pk} "
-            f"sp#{self.supplier_part_pk} stock#{self.stock_item_pk}"
+            f"sp#{self.supplier_part_pk} stock#{self.stock_item_pk} "
+            f"img#{int(self.image_uploaded)}"
         )
 
 
@@ -83,10 +89,15 @@ class WriteOptions:
     """单次写入的可选项。"""
 
     update_existing: bool = False  # True 时更新已存在 Part 的 description/notes/image
-    create_stock: bool = True
+    # 默认 False：只建器件，不建 StockItem（库存应由用户手工管理）
+    create_stock: bool = False
     quantity: int | None = None
     extra_note: str | None = None
     dry_run: bool = False
+    # 图片上传：复用 CLI 已有的 Fetcher 实例以共享 1 req/s 限速
+    fetcher: Fetcher | None = None
+    # --update 时为 True，强制覆盖已有图片
+    force_image_upload: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +117,7 @@ class InvenTreeWriter:
         self._supplier_cache: dict[str, int] = {}
         self._category_cache: dict[str, int] = {}
         self._template_cache: dict[str, int] = {}
+        self._warned_param_skip: bool = False
 
     # ---- public ---------------------------------------------------------
 
@@ -141,6 +153,16 @@ class InvenTreeWriter:
             )
             result.part_pk = part_pk
             result.created["part"] = created
+
+            # 4b. 图片上传（best-effort；失败不影响后续步骤）
+            # 放在 dry-run 守卫之前：dry-run 时仍记录 image_url 让 CLI 展示
+            self._upload_image(
+                part,
+                part_pk=part_pk,
+                result=result,
+                fetcher=opts.fetcher,
+                force=opts.force_image_upload,
+            )
 
             if opts.dry_run or part_pk is None:
                 return result
@@ -352,6 +374,76 @@ class InvenTreeWriter:
                 return p.pk
         return None
 
+    # ---- image upload --------------------------------------------------
+
+    def _upload_image(
+        self,
+        part: LCSCPart,
+        *,
+        part_pk: int | None,
+        result: WriteResult,
+        fetcher: Fetcher | None = None,
+        force: bool = False,
+    ) -> None:
+        """把 LCSC image_urls[0] 上传到 InvenTree Part.image。
+
+        行为：
+        - `lcsc_upload_image=false` → 跳过，记 image_skipped_reason="disabled"
+        - Part.image 已有值且非 force → 跳过，记 "already-uploaded"
+        - 其它情况：下载到本地缓存 → 调 `Part.uploadImage(path)` → 删本地文件
+        - 任何步骤失败：warning log + 记 skip reason；不影响 part_pk / 后续步骤
+
+        复用 `opts.fetcher` 共享 1 req/s 限速；没传则新建一个（限速独立计时）。
+        """
+        if not self.settings.lcsc_upload_image:
+            result.image_url = part.image_urls[0] if part.image_urls else None
+            result.image_skipped_reason = "disabled"
+            return
+        if not part.image_urls:
+            result.image_skipped_reason = "no-image-on-lcsc"
+            return
+        url = part.image_urls[0]
+        result.image_url = url
+
+        # dry-run 不下载/不上传，仅记录 url
+        if part_pk is None:
+            result.image_skipped_reason = "dry-run"
+            return
+
+        # 幂等：Part 已有图片且非强制 → 跳过
+        if not force:
+            try:
+                existing = Part(self.api, part_pk)
+                if getattr(existing, "image", None):
+                    result.image_skipped_reason = "already-uploaded"
+                    return
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("查询 Part.image 失败（将继续尝试上传）pk=%s: %s", part_pk, exc)
+
+        # 下载到本地缓存（限速通过 fetcher 共享）
+        f = fetcher or default_fetcher(self.settings)
+        try:
+            local_path = f.download_image(part.sku, url)
+        except (LcscFetchError, Exception) as exc:  # noqa: BLE001
+            logger.warning("LCSC image download failed sku=%s: %s", part.sku, exc)
+            result.image_skipped_reason = f"download-failed: {type(exc).__name__}"
+            return
+
+        # 上传（Part.uploadImage 需要文件路径，SDK 暂不支持 BytesIO）
+        try:
+            Part(self.api, part_pk).uploadImage(str(local_path))
+            result.image_uploaded = True
+            result.image_skipped_reason = None
+            logger.info("Part image uploaded sku=%s url=%s", part.sku, url)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("InvenTree image upload failed sku=%s: %s", part.sku, exc)
+            result.image_skipped_reason = f"upload-failed: {type(exc).__name__}"
+        finally:
+            try:
+                local_path.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001
+                pass
+
     @staticmethod
     def _build_keywords(part: LCSCPart) -> str:
         bits: list[str] = [part.sku]
@@ -393,18 +485,40 @@ class InvenTreeWriter:
         for inv_name, body in params.items():
             tpl_pk = self._ensure_template(inv_name)
             if tpl_pk is None:
+                # SDK 客户端 MAX_API_VERSION < 服务端 api_version：客户端太旧。
+                # 不阻塞 Part/SupplierPart/Stock 写入；用 logger 一次性记录原因。
+                if not self._warned_param_skip:
+                    logger.warning(
+                        "PartParameterTemplate 在当前 inventree-python SDK (v%s, MAX_API_VERSION=%s) "
+                        "下不支持服务端的 API v%s；已跳过 PartParameter 写入。"
+                        "升级 inventree-python>=<next> 即可恢复。",
+                        getattr(PartParameterTemplate, "__version__", "?"),
+                        PartParameterTemplate.MAX_API_VERSION,
+                        getattr(self.api, "api_version", "?"),
+                    )
+                    self._warned_param_skip = True
                 continue
             value = body["value"]
             if inv_name in existing:
-                existing[inv_name].save({"value": value})
+                try:
+                    existing[inv_name].save({"value": value})
+                except NotImplementedError:
+                    # 同上：PartParameter 的 SDK 也太旧
+                    continue
             else:
-                PartParameter.create(
-                    self.api,
-                    {"part": part_pk, "template": tpl_pk, "value": value},
-                )
+                try:
+                    PartParameter.create(
+                        self.api,
+                        {"part": part_pk, "template": tpl_pk, "value": value},
+                    )
+                except NotImplementedError:
+                    continue
 
     def _ensure_template(self, name: str) -> int | None:
-        """确保 PartParameterTemplate 存在；返回 pk。"""
+        """确保 PartParameterTemplate 存在；返回 pk。
+
+        客户端 SDK 太旧时返回 None（调用方据此跳过）。
+        """
         if name in self._template_cache:
             return self._template_cache[name]
         # 搜索现有
@@ -413,13 +527,20 @@ class InvenTreeWriter:
                 if getattr(t, "name", None) == name:
                     self._template_cache[name] = t.pk
                     return t.pk
+        except NotImplementedError:
+            # SDK 客户端 MAX_API_VERSION < 服务端
+            self._template_cache[name] = None  # type: ignore[assignment]
+            return None
         except Exception:  # noqa: BLE001
             pass
         # 创建
-        obj = PartParameterTemplate.create(
-            self.api,
-            {"name": name, "description": "auto-created by lcsc2inventree"},
-        )
+        try:
+            obj = PartParameterTemplate.create(
+                self.api,
+                {"name": name, "description": "auto-created by lcsc2inventree"},
+            )
+        except NotImplementedError:
+            return None
         self._template_cache[name] = obj.pk
         return obj.pk
 
@@ -514,5 +635,8 @@ class InvenTreeWriter:
         if price is not None:
             payload["purchase_price"] = str(price)
             payload["purchase_price_currency"] = currency or "USD"
-        obj = StockItem.create(self.api, payload)
-        return obj.pk
+        # StockItem.create 在 inventree-python 0.14+ 返回 list（即使单条创建）
+        objs = StockItem.create(self.api, payload)
+        if not objs:
+            return None
+        return objs[0].pk
