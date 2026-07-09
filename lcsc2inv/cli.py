@@ -184,9 +184,7 @@ def import_cmd(
         fetcher=fetcher,  # 复用限速（图片下载与 HTML 抓取共享 1 req/s）
         force_image_upload=update,  # --update 时强制覆盖图片
     )
-    # 传给 writer.upsert_part 的 options 需要包装成包含 create_missing_category 的 dict
-    # 目前 WriteOptions 没这个字段，我们直接调用 upsert_part 并在内部处理
-    result = writer.upsert_part_with_category(part, options=opts, create_missing_category=create_missing_category)
+    result = writer.upsert_part(part, options=opts, create_missing_category=create_missing_category)
     _print_result(code, result)
 
 
