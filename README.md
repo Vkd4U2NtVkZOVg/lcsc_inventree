@@ -4,6 +4,11 @@
 
 受 [sparkmicro/Ki-nTree](https://github.com/sparkmicro/Ki-nTree) 启发，但聚焦在 **LCSC → InvenTree** 这一条数据通路，砍掉了 KiCad 集成和 GUI，提供一个轻量的 CLI + CSV 批量工具。
 
+> [!IMPORTANT]
+> **本项目由 AI 全程创建**（代码、文档、测试均由 AI 助手生成），作者未做人工审查，
+> **不提供任何形式的技术支持**。请自行评估代码质量与安全性后谨慎使用，
+> 使用产生的任何后果自负。Issue / PR 未必有人处理，请酌情自取。
+
 ## 功能
 
 - 🔍 输入 LCSC C-code（如 `C28323`）或商品 URL，自动从商品页 `ld+json` 抽取字段
