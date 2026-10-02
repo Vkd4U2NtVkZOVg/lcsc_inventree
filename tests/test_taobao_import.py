@@ -545,3 +545,88 @@ class TestUpdateCustomPartFields:
         assert r["image"] is None
         assert r["parameters"] is None
         assert r["errors"] == []
+
+
+# ---------------------------------------------------------------------------
+# 参数名/值清洗截断（InvenTree 限模板名 100、值 500）
+# ---------------------------------------------------------------------------
+
+
+def _writer_new_api():
+    """构造跳过端点探测的 writer（new API 风格，REST 可注入）。"""
+    from lcsc2inv.inventree_writer import InvenTreeWriter
+
+    w = InvenTreeWriter.__new__(InvenTreeWriter)
+    w.api = MagicMock()
+    w.settings = MagicMock()
+    w.supplier_name = "LCSC Electronics"
+    w._mfr_cache, w._supplier_cache = {}, {}
+    w._category_cache, w._template_cache = {}, {}
+    w._param_style = "new"
+    return w
+
+
+class _RestStub:
+    """替换 writer._rest：按序回放 (status, data)，并记录调用。"""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls: list[dict] = []
+
+    def __call__(self, method, path, *, params=None, json=None):
+        self.calls.append(
+            {"method": method, "path": path, "params": params, "json": json}
+        )
+        status, data = self.responses.pop(0)
+        return status, data
+
+    def of(self, method: str, path: str) -> list[dict]:
+        return [c for c in self.calls if c["method"] == method and c["path"] == path]
+
+
+class TestParamSanitize:
+    def test_long_value_truncated_to_500(self):
+        w = _writer_new_api()
+        rest = _RestStub([
+            (200, [{"pk": 7, "name": "颜色分类"}]),
+            (200, []),
+            (201, {"pk": 9}),
+        ])
+        w._rest = rest
+        long_value = "颜" * 600
+        assert w.set_named_parameter(part_pk=1, name="颜色分类",
+                                     value=long_value) is True
+        posts = rest.of("POST", "/api/parameter/")
+        assert len(posts[0]["json"]["data"]) == 500
+
+    def test_long_name_truncated_to_100(self):
+        w = _writer_new_api()
+        rest = _RestStub([
+            (200, []),            # 模板列表：不存在
+            (201, {"pk": 7}),     # 创建模板
+            (200, []),            # 无参数
+            (201, {"pk": 9}),
+        ])
+        w._rest = rest
+        assert w.set_named_parameter(part_pk=1, name="名" * 150, value="v") is True
+        tpl = rest.of("POST", "/api/parameter/template/")[0]["json"]
+        assert len(tpl["name"]) == 100
+
+    def test_value_strips_carriage_returns(self):
+        w = _writer_new_api()
+        rest = _RestStub([
+            (200, [{"pk": 7, "name": "T"}]),
+            (200, []),
+            (201, {"pk": 9}),
+        ])
+        w._rest = rest
+        w.set_named_parameter(part_pk=1, name="T", value="a\r\nb\r\n")
+        posts = rest.of("POST", "/api/parameter/")
+        assert posts[0]["json"]["data"] == "a\nb"
+
+    def test_empty_name_returns_false_without_api_calls(self):
+        w = _writer_new_api()
+        rest = _RestStub([])
+        w._rest = rest
+        assert w.set_named_parameter(part_pk=1, name="  ", value="v") is False
+        assert rest.calls == []

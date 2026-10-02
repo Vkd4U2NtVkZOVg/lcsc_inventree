@@ -47,6 +47,11 @@ from lcsc2inv.mapping import to_inventree_parameters, to_part_notes
 
 logger = logging.getLogger(__name__)
 
+# InvenTree 字段长度限制（common.models.ParameterTemplate.name=100 /
+# Parameter.data=500）；超长会 400
+PARAM_NAME_MAX = 100
+PARAM_VALUE_MAX = 500
+
 
 # ---------------------------------------------------------------------------
 # 数据类：写操作的"建议"，由 writer 落地
@@ -778,6 +783,16 @@ class InvenTreeWriter:
             return data
         return []
 
+    @staticmethod
+    def _clean_param_name(name: str) -> str:
+        """参数模板名清洗 + 截断（InvenTree 限 100 字符）。"""
+        return str(name or "").strip()[:PARAM_NAME_MAX]
+
+    @staticmethod
+    def _clean_param_value(value: str) -> str:
+        """参数值清洗 + 截断（InvenTree 限 500 字符，超长会 400）。"""
+        return str(value or "").replace("\r", "").strip()[:PARAM_VALUE_MAX]
+
     def _param_api_style(self) -> str:
         """探测参数 API 形态并缓存。
 
@@ -839,6 +854,9 @@ class InvenTreeWriter:
         「模板不存在」与「查询失败」，前者才允许创建）。
         strict=False：查询失败返回 None（只读场景）。
         """
+        name = self._clean_param_name(name)
+        if not name:
+            return None
         code, data = self._rest(
             "GET", self._param_url("template"), params={"limit": 1000}
         )
@@ -853,6 +871,9 @@ class InvenTreeWriter:
 
     def _ensure_template(self, name: str) -> int | None:
         """确保参数模板存在（REST 实现，兼容新旧端点）；失败返回 None。"""
+        name = self._clean_param_name(name)
+        if not name:
+            return None
         if name in self._template_cache:
             return self._template_cache[name]
         try:
@@ -911,35 +932,48 @@ class InvenTreeWriter:
         url = self._param_url("param")
         value_field = "data" if self._param_api_style() == "new" else "value"
         for inv_name, body in params.items():
+            inv_name = self._clean_param_name(inv_name)
+            value = self._clean_param_value(body["value"])
+            if not inv_name or not value:
+                continue
             tpl_pk = self._ensure_template(inv_name)
             if tpl_pk is None:
                 continue
-            value = body["value"]
             cur = existing.get(tpl_pk)
             if cur is not None:
                 if cur[1] == value:
                     continue
-                code, _ = self._rest(
+                code, data = self._rest(
                     "PATCH", f"{url}{cur[0]}/", json={value_field: value}
                 )
                 if code >= 400:
-                    raise RuntimeError(f"更新参数 {inv_name} 失败 HTTP {code}")
+                    raise RuntimeError(
+                        f"更新参数 {inv_name} 失败 HTTP {code}: {data}"
+                    )
             else:
-                code, _ = self._rest(
+                code, data = self._rest(
                     "POST", url,
                     json=self._param_link_payload(part_pk, tpl_pk, value),
                 )
                 if code >= 400:
-                    raise RuntimeError(f"创建参数 {inv_name} 失败 HTTP {code}")
+                    raise RuntimeError(
+                        f"创建参数 {inv_name} 失败 HTTP {code}: {data}"
+                    )
 
     def set_named_parameter(self, *, part_pk: int, name: str, value: str) -> bool:
         """写入/更新单个命名参数（模板不存在则自动创建），不动其它参数。
+
+        名称/值按 InvenTree 字段限制截断（模板名 100、值 500 字符）。
 
         Returns:
             True=写入成功或值已一致；False=模板不可用（查询/创建失败）。
         Raises:
             RuntimeError: 参数列表/写入的 REST 调用失败。
         """
+        name = self._clean_param_name(name)
+        value = self._clean_param_value(value)
+        if not name:
+            return False
         tpl_pk = self._ensure_template(name)
         if tpl_pk is None:
             return False
@@ -953,15 +987,15 @@ class InvenTreeWriter:
         url = self._param_url("param")
         value_field = "data" if self._param_api_style() == "new" else "value"
         if cur is not None:
-            code, _ = self._rest(
+            code, data = self._rest(
                 "PATCH", f"{url}{cur['pk']}/", json={value_field: value}
             )
         else:
-            code, _ = self._rest(
+            code, data = self._rest(
                 "POST", url, json=self._param_link_payload(part_pk, tpl_pk, value)
             )
         if code >= 400:
-            raise RuntimeError(f"写入参数 {name} 失败 HTTP {code}")
+            raise RuntimeError(f"写入参数 {name} 失败 HTTP {code}: {data}")
         return True
 
     def set_package_parameter(self, *, part_pk: int, value: str) -> bool:
