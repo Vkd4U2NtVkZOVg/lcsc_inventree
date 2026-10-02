@@ -497,9 +497,91 @@ def api_import():
     return jsonify(result_dict)
 
 
+def _form_bool(value, default: bool = False) -> bool:
+    """multipart 表单里的布尔字段（"true"/"1"/"on"）。"""
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "on", "yes", "是")
+
+
+def _part_update_from_taobao():
+    """multipart 分支：用淘宝 .mhtml 数据更新已存在 Part（/api/part/update）。"""
+    f = request.files.get("file")
+    try:
+        part_pk = int(request.form.get("part_pk", ""))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "缺少或非法 part_pk"}), 400
+    try:
+        item = parse_mhtml(f.read(), source_filename=f.filename)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": f"解析 mhtml 失败: {exc}"}), 400
+
+    image_url = item.main_image_url()
+    image_data = item.embedded_bytes(image_url) if image_url else None
+    params = {n: v for n, v in item.params}
+    flags = dict(
+        update_name=_form_bool(request.form.get("name")),
+        update_description=_form_bool(request.form.get("description"), True),
+        update_image=_form_bool(request.form.get("image"), True),
+        update_keywords=_form_bool(request.form.get("keywords"), True),
+        update_notes=_form_bool(request.form.get("notes")),
+        update_parameters=_form_bool(request.form.get("parameters")),
+    )
+
+    with _write_lock:
+        try:
+            api = build_inventree_api()
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 500
+        writer = InvenTreeWriter(api, _get_settings())
+        try:
+            result = writer.update_custom_part_fields(
+                part_pk=part_pk,
+                name=item.default_name(),
+                description=item.default_description(),
+                notes=_taobao_notes(item, item.price, item.selected_sku),
+                keywords=",".join(
+                    k for k in ("淘宝", item.shop or "", item.item_id or "") if k
+                ),
+                link=item.url,
+                parameters=params,
+                image_data=image_data,
+                **flags,
+            )
+        except ValueError as exc:
+            err = str(exc)
+            _record_history(code=item.default_ipn(), part_pk=part_pk, ok=False,
+                            summary=err, error=err, part_url=None,
+                            entry_type="taobao_update")
+            return jsonify({"ok": False, "error": err}), 404
+
+    ok = not result.get("errors")
+    summary = (
+        f"淘宝更新 {part_pk}: {','.join(result['updated_fields']) or '无字段'}"
+        f"{' +图片' if result.get('image') else ''}"
+        f"{' +参数' if result.get('parameters') else ''}"
+    )
+    _record_history(
+        code=item.default_ipn(),
+        part_pk=part_pk,
+        ok=ok,
+        summary=summary,
+        error="; ".join(result["errors"]) or None,
+        part_url=_part_url(part_pk),
+        entry_type="taobao_update",
+    )
+    resp = {"ok": ok, "part_pk": part_pk, "code": item.default_ipn(),
+            "part_url": _part_url(part_pk), **result}
+    return jsonify(resp), (200 if ok else 502)
+
+
 @app.route("/api/part/update", methods=["POST"])
 def api_part_update():
     """用 LCSC 最新数据更新**已存在**的 Part（不新建）。
+
+    支持两种数据源：
+    - JSON 体 + code：LCSC 数据（原有流程）
+    - multipart + file(.mhtml)：淘宝页面数据（本地解析，图片取内嵌字节）
 
     请求体（JSON）：
         part_pk: int        必填，InvenTree Part 主键
@@ -511,8 +593,16 @@ def api_part_update():
         notes: bool         更新备注+LCSC 链接（默认 false）
         parameters: bool    写入分类映射参数（默认 false）
 
+    multipart 表单字段（淘宝源）：
+        part_pk: 数字       必填
+        file: .mhtml        必填
+        name/description/image/keywords/notes/parameters: "true"/"false"
+
     不动的字段：分类、厂商/供应商、价格、库存。
     """
+    if request.files.get("file"):
+        return _part_update_from_taobao()
+
     data = request.get_json(silent=True) or {}
     try:
         part_pk = int(data["part_pk"])

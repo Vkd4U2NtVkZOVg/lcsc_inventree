@@ -316,6 +316,68 @@ class TestTaobaoEndpoints:
         assert "未创建库存" in out["stock_barcode_error"]
         m_req.assert_not_called()
 
+    def test_part_update_from_taobao_mhtml(self, taobao_writer):
+        """单条导入页「更新现有 Part」的淘宝 mhtml 分支（multipart）。"""
+        client, writer = taobao_writer
+        writer.update_custom_part_fields.return_value = {
+            "updated_fields": ["description", "keywords"],
+            "image": {"uploaded": True, "skipped_reason": None, "url": None},
+            "parameters": {"written": True},
+            "errors": [],
+        }
+        data = _build_mhtml(HTML_FULL, images=IMAGES)
+        rv = client.post(
+            "/api/part/update",
+            data={"part_pk": "1613", "description": "true", "parameters": "true",
+                  "file": (io.BytesIO(data), "01-test.mhtml")},
+            content_type="multipart/form-data",
+        )
+        assert rv.status_code == 200
+        d = rv.get_json()
+        assert d["ok"] is True and d["part_pk"] == 1613
+        assert d["part_url"]
+        kwargs = writer.update_custom_part_fields.call_args.kwargs
+        assert kwargs["part_pk"] == 1613
+        assert kwargs["name"] == "测试电阻 0805 10kΩ"
+        assert kwargs["update_name"] is False          # 默认不动名称
+        assert kwargs["update_description"] is True
+        assert kwargs["update_parameters"] is True
+        assert kwargs["image_data"] is not None        # 内嵌图片字节
+        assert kwargs["parameters"].get("品牌") == "利冷科"
+
+    def test_part_update_taobao_bad_pk_400(self, taobao_writer):
+        client, _ = taobao_writer
+        data = _build_mhtml(HTML_FULL)
+        rv = client.post(
+            "/api/part/update",
+            data={"part_pk": "abc", "file": (io.BytesIO(data), "x.mhtml")},
+            content_type="multipart/form-data",
+        )
+        assert rv.status_code == 400
+
+    def test_part_update_taobao_bad_file_400(self, taobao_writer):
+        client, _ = taobao_writer
+        rv = client.post(
+            "/api/part/update",
+            data={"part_pk": "5", "file": (io.BytesIO(b"garbage"), "x.mhtml")},
+            content_type="multipart/form-data",
+        )
+        assert rv.status_code == 400
+
+    def test_part_update_taobao_part_missing_404(self, taobao_writer):
+        client, writer = taobao_writer
+        writer.update_custom_part_fields.side_effect = ValueError(
+            "Part pk=999 不存在或无法访问"
+        )
+        data = _build_mhtml(HTML_FULL)
+        rv = client.post(
+            "/api/part/update",
+            data={"part_pk": "999", "file": (io.BytesIO(data), "x.mhtml")},
+            content_type="multipart/form-data",
+        )
+        assert rv.status_code == 404
+        assert "不存在" in rv.get_json()["error"]
+
     def test_import_skip_and_missing_token(self, taobao_writer):
         client, writer = taobao_writer
         rv = client.post("/api/taobao/import", json={
@@ -405,3 +467,81 @@ class TestUpsertCustomPartStock:
         assert r.ok() is True
         assert r.stock_item_pk is None
         m_stock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# writer 层：update_custom_part_fields（淘宝数据刷新已有 Part）
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateCustomPartFields:
+    def _writer(self):
+        from lcsc2inv.inventree_writer import InvenTreeWriter
+
+        w = InvenTreeWriter.__new__(InvenTreeWriter)
+        w.api = MagicMock()
+        w.settings = MagicMock()
+        w.supplier_name = "LCSC Electronics"
+        w._mfr_cache, w._supplier_cache = {}, {}
+        w._category_cache, w._template_cache = {}, {}
+        return w
+
+    def test_updates_chosen_fields_params_and_image(self):
+        w = self._writer()
+        saved: list[dict] = []
+
+        class FakePart:
+            def __init__(self, api, pk):
+                self.pk = pk
+            def save(self, payload):
+                saved.append(payload)
+
+        with patch("lcsc2inv.inventree_writer.Part", FakePart), \
+             patch.object(w, "_upload_image_bytes",
+                          return_value=(True, None)) as m_img, \
+             patch.object(w, "set_named_parameter",
+                          return_value=True) as m_param:
+            r = w.update_custom_part_fields(
+                part_pk=5, name="新名称", description="新描述", notes="备注",
+                keywords="淘宝,店", link="https://item.taobao.com/x",
+                parameters={"品牌": "XF"}, image_data=(PNG_BYTES, ".png"),
+                update_name=True, update_notes=True, update_parameters=True,
+            )
+        assert saved[0] == {"name": "新名称", "description": "新描述",
+                            "keywords": "淘宝,店", "notes": "备注",
+                            "link": "https://item.taobao.com/x"}
+        assert r["updated_fields"] == sorted(saved[0].keys())
+        assert r["image"] == {"uploaded": True, "skipped_reason": None, "url": None}
+        m_img.assert_called_once_with(part_pk=5, data=PNG_BYTES, ext=".png")
+        m_param.assert_called_once_with(part_pk=5, name="品牌", value="XF")
+        assert r["parameters"] == {"written": True}
+
+    def test_part_missing_raises_valueerror(self):
+        w = self._writer()
+
+        class Boom:
+            def __init__(self, api, pk):
+                raise RuntimeError("no such part")
+
+        with patch("lcsc2inv.inventree_writer.Part", Boom):
+            with pytest.raises(ValueError, match="不存在"):
+                w.update_custom_part_fields(part_pk=1, update_description=False)
+
+    def test_image_disabled_and_no_params(self):
+        w = self._writer()
+        saved: list[dict] = []
+
+        class FakePart:
+            def __init__(self, api, pk):
+                self.pk = pk
+            def save(self, payload):
+                saved.append(payload)
+
+        with patch("lcsc2inv.inventree_writer.Part", FakePart):
+            r = w.update_custom_part_fields(
+                part_pk=5, description="只改描述", update_image=False,
+            )
+        assert saved[0] == {"description": "只改描述"}
+        assert r["image"] is None
+        assert r["parameters"] is None
+        assert r["errors"] == []

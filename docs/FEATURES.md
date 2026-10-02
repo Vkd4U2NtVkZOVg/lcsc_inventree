@@ -104,14 +104,22 @@ Web 工作台：导入 · 扫码(转移/盘点/扣减) · 条码查看/绑定 ·
 
 ### 更新现有 Part（单条导入页内）
 
-输入 **Part ID** + **LCSC 代码/链接**，按 LCSC 最新数据刷新已存在的 Part。
-字段勾选：描述 / 图片（强制重传）/ 关键词（默认开），备注+链接 / 参数（默认关）。
+输入 **Part ID** + 数据源，刷新已存在的 Part。**数据源二选一**：
+- **LCSC**：LCSC 代码/链接，按 LCSC 最新数据刷新（原有流程）；
+- **淘宝**：上传 .mhtml（本地解析，图片取内嵌字节），走同一组字段勾选。
 
-- **不新建**、不动名称/分类/厂商/供应商/价格/库存；
-- 复用导入的图片上传逻辑（下载 → `Part.uploadImage`，失败只记原因）；
-- 参数写入按 LCSC 分类走 `field_map.yaml` 模板映射，只写不删；
+字段勾选：描述 / 图片（强制重传）/ 关键词（默认开），名称 / 备注+链接 / 参数（默认关）。
+
+- **不新建**、不动分类/厂商/供应商/价格/库存；
+- LCSC 路径复用图片下载逻辑；淘宝路径走 `update_custom_part_fields`
+  （内嵌图片 webp→jpg 强制重传，参数为 mhtml 解析出的键值对）；
+- 参数写入走 REST（见「参数写入绕过 SDK」）；LCSC 路径按分类走
+  `field_map.yaml` 模板映射，只写不删；
 - **封装**：更新描述时自动在尾部追加 `（封装：xxx）`（取 LCSC `Package`/国内站
-  「商品封装」参数，或订单导入显式传入的 footprint；已含则不重复）。
+  「商品封装」参数，或订单导入显式传入的 footprint；已含则不重复）；
+- 结果按字段反馈（`updated_fields` / `image.skipped_reason` / `errors`），
+  部分失败返回 502 且写入历史（type=`update` / `taobao_update`）；
+- Part ID 不存在返回 404。
 - 结果按字段反馈（`updated_fields` / `image.skipped_reason` / `errors`），
   部分失败返回 502 且写入历史（type=`update`）；
 - Part ID 不存在返回 404。

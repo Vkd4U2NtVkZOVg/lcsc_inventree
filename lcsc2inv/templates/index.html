@@ -181,15 +181,25 @@
     </div>
 
     <div class="card">
-      <h2>更新现有 Part（从 LCSC 刷新）</h2>
-      <p class="dim" style="margin:4px 0 0;">给已存在的 Part 按 LCSC 最新数据更新所选字段。<b>不新建</b>、不动分类/厂商/库存（名称默认不动，可勾选更新）。Part ID 见 Part 详情页网址（<span class="mono">/part/&lt;ID&gt;/</span>）。</p>
+      <h2>更新现有 Part（LCSC / 淘宝）</h2>
+      <p class="dim" style="margin:4px 0 0;">给已存在的 Part 按所选数据源更新字段。<b>不新建</b>、不动分类/厂商/库存（名称默认不动，可勾选更新）。Part ID 见 Part 详情页网址（<span class="mono">/part/&lt;ID&gt;/</span>）。</p>
       <label>Part ID（InvenTree 内部编号，纯数字）</label>
       <input type="text" id="u-part" placeholder="如 1613">
-      <label>LCSC 代码 / 链接</label>
-      <div class="input-actions">
-        <input type="text" id="u-code" placeholder="C28323 或商品链接">
-        <button type="button" class="btn mini" id="u-paste" style="white-space:nowrap;">粘贴</button>
-        <button type="button" class="btn mini" id="u-clear" style="background:#6b7280;white-space:nowrap;">清空</button>
+      <div class="row">
+        <label class="box"><input type="radio" name="u-source" value="lcsc" checked>LCSC 数据</label>
+        <label class="box"><input type="radio" name="u-source" value="taobao">淘宝 .mhtml 文件</label>
+      </div>
+      <div id="u-lcsc-row">
+        <label>LCSC 代码 / 链接</label>
+        <div class="input-actions">
+          <input type="text" id="u-code" placeholder="C28323 或商品链接">
+          <button type="button" class="btn mini" id="u-paste" style="white-space:nowrap;">粘贴</button>
+          <button type="button" class="btn mini" id="u-clear" style="background:#6b7280;white-space:nowrap;">清空</button>
+        </div>
+      </div>
+      <div id="u-taobao-row" style="display:none;">
+        <label>淘宝页面文件（.mhtml / .mht，建议先在商品页选好规格）</label>
+        <input type="file" id="u-file" accept=".mhtml,.mht">
       </div>
       <div class="row">
         <label class="box"><input type="checkbox" id="u-name">名称</label>
@@ -904,7 +914,7 @@ $("u-paste").onclick=async function(){
   }
 };
 $("u-clear").onclick=function(){
-  $("u-part").value=""; $("u-code").value="";
+  $("u-part").value=""; $("u-code").value=""; $("u-file").value="";
   $("u-log").style.display="none";
   setStatus("u-status","");
   $("u-part").focus();
@@ -915,55 +925,90 @@ $("u-code").addEventListener("keydown", function(e){
 $("u-part").addEventListener("keydown", function(e){
   if(e.key==="Enter"){ e.preventDefault(); $("u-code").focus(); }
 });
+function applyUpdateResult(d){
+  if(d.ok===false){
+    setStatus("u-status","❌ "+(d.error||(d.errors&&d.errors.join("; "))||"更新失败"),"err");
+  } else if(d.errors && d.errors.length){
+    setStatus("u-status","⚠ 部分失败，详见日志","err");
+  } else {
+    setStatus("u-status","✅ 更新完成："+(d.updated_fields||[]).join(", "),"ok");
+  }
+  $("u-log").textContent=JSON.stringify({
+    part_pk: d.part_pk, code: d.code,
+    updated_fields: d.updated_fields,
+    image: d.image, parameters: d.parameters,
+    errors: d.errors
+  }, null, 2);
+  $("u-log").style.display="block";
+  // 更新成功 → 提供一键直达 Part 页面（有字段错误但 Part 存在时也给出）
+  var linkBox=$("u-link");
+  if(d.part_url){
+    linkBox.innerHTML='<p class="status ok" style="margin-top:14px;">'+
+      '<a class="partlink" href="'+esc(d.part_url)+'" target="_blank" rel="noopener">'+
+      '打开 Part 页面（'+esc(String(d.part_pk))+'） ↗</a></p>';
+  } else {
+    linkBox.innerHTML="";
+  }
+}
+function uSourceTaobao(){
+  var el=document.querySelector('input[name="u-source"]:checked');
+  return el && el.value==="taobao";
+}
+document.querySelectorAll('input[name="u-source"]').forEach(function(r){
+  r.addEventListener("change", function(){
+    var tb=uSourceTaobao();
+    $("u-lcsc-row").style.display = tb ? "none" : "";
+    $("u-taobao-row").style.display = tb ? "" : "none";
+  });
+});
 $("u-run").onclick=function(){
   var btn=$("u-run"); btn.disabled=true;
   var partPk=($("u-part").value||"").trim();
-  var code=($("u-code").value||"").trim();
   if(!/^\d+$/.test(partPk)){
     setStatus("u-status","❌ 请填写数字 Part ID","err"); btn.disabled=false; return;
   }
-  if(!code){
-    setStatus("u-status","❌ 请填写 LCSC 代码或链接","err"); btn.disabled=false; return;
-  }
-  var norm=normalizeCode(code);
-  if(!norm.ok){ setStatus("u-status","❌ "+norm.error,"err"); showPreview(norm); btn.disabled=false; return; }
-  setStatus("u-status","正在抓取 LCSC 并更新…");
   $("u-log").style.display="none";
   $("u-link").innerHTML="";
-  postForm("/api/part/update", {
-    part_pk: parseInt(partPk,10),
-    code: norm.code,
+  var flags={
     name: $("u-name").checked,
     description: $("u-desc").checked,
     image: $("u-image").checked,
     keywords: $("u-kw").checked,
     notes: $("u-notes").checked,
     parameters: $("u-params").checked
-  }).then(function(d){
-    if(d.ok===false){
-      setStatus("u-status","❌ "+(d.error||(d.errors&&d.errors.join("; "))||"更新失败"),"err");
-    } else if(d.errors && d.errors.length){
-      setStatus("u-status","⚠ 部分失败，详见日志","err");
-    } else {
-      setStatus("u-status","✅ 更新完成："+(d.updated_fields||[]).join(", "),"ok");
-    }
-    $("u-log").textContent=JSON.stringify({
-      part_pk: d.part_pk, code: d.code,
-      updated_fields: d.updated_fields,
-      image: d.image, parameters: d.parameters,
-      errors: d.errors
-    }, null, 2);
-    $("u-log").style.display="block";
-    // 更新成功 → 提供一键直达 Part 页面（有字段错误但 Part 存在时也给出）
-    var linkBox=$("u-link");
-    if(d.part_url){
-      linkBox.innerHTML='<p class="status ok" style="margin-top:14px;">'+
-        '<a class="partlink" href="'+esc(d.part_url)+'" target="_blank" rel="noopener">'+
-        '打开 Part 页面（'+esc(String(d.part_pk))+'） ↗</a></p>';
-    } else {
-      linkBox.innerHTML="";
-    }
-  }).catch(function(e){
+  };
+  if(uSourceTaobao()){
+    var f=$("u-file").files[0];
+    if(!f){ setStatus("u-status","❌ 请选择淘宝 .mhtml 文件","err"); btn.disabled=false; return; }
+    setStatus("u-status","正在解析淘宝文件并更新…");
+    var fd=new FormData();
+    fd.append("part_pk", partPk);
+    fd.append("file", f);
+    Object.keys(flags).forEach(function(k){ fd.append(k, flags[k]); });
+    fetch("/api/part/update", {method:"POST", body:fd})
+      .then(function(r){ return r.json().catch(function(){ return {error:"响应非 JSON"}; }); })
+      .then(applyUpdateResult)
+      .catch(function(e){ setStatus("u-status","❌ 请求异常："+e.message,"err"); })
+      .finally(function(){ btn.disabled=false; });
+    return;
+  }
+  var code=($("u-code").value||"").trim();
+  if(!code){
+    setStatus("u-status","❌ 请填写 LCSC 代码或链接","err"); btn.disabled=false; return;
+  }
+  var norm=normalizeCode(code);
+  if(!norm.ok){ setStatus("u-status","❌ "+norm.error,"err"); showPreview(norm); btn.disabled=false; return; }
+  setStatus("u-status","正在抓取 LCSC 并更新…");
+  postForm("/api/part/update", {
+    part_pk: parseInt(partPk,10),
+    code: norm.code,
+    name: flags.name,
+    description: flags.description,
+    image: flags.image,
+    keywords: flags.keywords,
+    notes: flags.notes,
+    parameters: flags.parameters
+  }).then(applyUpdateResult).catch(function(e){
     setStatus("u-status","❌ 请求异常："+e.message,"err");
   }).finally(function(){ btn.disabled=false; });
 };

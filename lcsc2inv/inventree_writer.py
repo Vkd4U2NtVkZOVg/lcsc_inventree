@@ -644,6 +644,99 @@ class InvenTreeWriter:
 
         return out
 
+    def update_custom_part_fields(
+        self,
+        *,
+        part_pk: int,
+        name: str | None = None,
+        description: str | None = None,
+        notes: str | None = None,
+        keywords: str | None = None,
+        link: str | None = None,
+        parameters: dict[str, str] | None = None,
+        image_data: tuple[bytes, str] | None = None,
+        update_name: bool = False,
+        update_description: bool = True,
+        update_image: bool = True,
+        update_keywords: bool = True,
+        update_notes: bool = False,
+        update_parameters: bool = False,
+    ) -> dict:
+        """用自定义来源（淘宝 mhtml 等）数据更新**已存在**的 Part。
+
+        与 `update_part_fields` 的区别：数据由调用方预算好（不抓 LCSC），
+        图片为内存字节（webp 自动转 jpg，强制重传），参数为任意键值对。
+
+        Returns:
+            结构同 `update_part_fields`：
+            {"updated_fields": [...], "image": {...},
+             "parameters": {"written": True}|None, "errors": [...]}
+
+        Raises:
+            ValueError: part_pk 不存在或无法访问。
+        """
+        try:
+            obj = Part(self.api, part_pk)
+            _ = obj.pk  # 触发加载，尽早暴露不存在的 pk
+        except Exception as exc:  # noqa: BLE001 — 统一转为清晰的 ValueError
+            raise ValueError(f"Part pk={part_pk} 不存在或无法访问: {exc}") from exc
+
+        out: dict = {
+            "updated_fields": [],
+            "image": None,
+            "parameters": None,
+            "errors": [],
+        }
+
+        payload: dict[str, Any] = {}
+        if update_name and name:
+            payload["name"] = name[:100]
+        if update_description and description is not None:
+            payload["description"] = description[:250]
+        if update_keywords and keywords:
+            payload["keywords"] = keywords
+        if update_notes:
+            if notes:
+                payload["notes"] = notes
+            if link:
+                payload["link"] = link
+        if payload:
+            try:
+                obj.save(payload)
+                out["updated_fields"] = sorted(payload.keys())
+            except Exception as exc:  # noqa: BLE001 — 字段失败不阻断图片
+                out["errors"].append(f"字段保存失败: {type(exc).__name__}: {exc}")
+
+        if update_image:
+            if image_data:
+                data, ext = image_data
+                uploaded, reason = self._upload_image_bytes(
+                    part_pk=part_pk, data=data, ext=ext
+                )
+                out["image"] = {
+                    "uploaded": uploaded, "skipped_reason": reason, "url": None,
+                }
+            else:
+                out["image"] = {
+                    "uploaded": False, "skipped_reason": "no-image", "url": None,
+                }
+
+        if update_parameters:
+            written = 0
+            for pname, pvalue in (parameters or {}).items():
+                if not pname or not pvalue:
+                    continue
+                try:
+                    if self.set_named_parameter(
+                        part_pk=part_pk, name=pname, value=str(pvalue)
+                    ):
+                        written += 1
+                except RuntimeError as exc:
+                    out["errors"].append(f"参数 {pname}: {exc}")
+            out["parameters"] = {"written": True} if written else None
+
+        return out
+
     # ---- parameters -----------------------------------------------------
     # 参数相关操作直接走 REST API：当前 inventree-python 0.23.2 的
     # MAX_API_VERSION=428 低于服务端 API 530，SDK 的 PartParameter* /
