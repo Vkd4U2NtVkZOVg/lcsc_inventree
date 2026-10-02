@@ -199,6 +199,10 @@ REST API 读不到绑定码原文，采用**一次性全量读取 + 本地缓存
 | 封装一键回填 | `./backfill_package.sh`（容器内 `python3 -m lcsc2inv
   backfill-package`）：扫描 IPN 为 LCSC 编号的全部 Part，重抓 LCSC 更新
   描述后缀/keywords/Package 参数。幂等，默认 dry-run，`--commit` 写入 |
+| 国内站描述模板文案 | 解析时即删除固定营销句「提供高清引脚图…尽在立创商城。」
+  （`lcsc_client.clean_description`，含句尾逗号清理）；
+  存量清理用 `./clean_descriptions.sh`（`clean-desc`，遍历全部 Part 只改
+  description，幂等，dry-run/commit 同约定） |
 
 ## 6. API 端点总表（web.py）
 

@@ -141,3 +141,27 @@ def test_chinese_site_footprint_from_html():
 def test_international_site_package_property(capacitor):
     """国际站 Package 参数直接暴露为 package 属性。"""
     assert capacitor.package == "0805"
+
+def test_cn_description_boilerplate_removed():
+    """国内站描述里的营销模板文案在解析时即被删除。"""
+    from lcsc2inv.lcsc_client import LCSC_CN_DESC_BOILERPLATE, load_fixture
+
+    p = load_fixture(FIXTURE_DIR / "CN_360864.html")
+    assert p.description and LCSC_CN_DESC_BOILERPLATE not in p.description
+    # 主体信息保留
+    assert p.description.startswith("R-RJ45R08P-C000")
+    assert p.description.endswith("。")
+
+
+def test_clean_description_variants():
+    from lcsc2inv.lcsc_client import LCSC_CN_DESC_BOILERPLATE as B, clean_description
+
+    # 前面是逗号的变体：残留逗号被清掉
+    assert clean_description("电阻10k，" + B) == "电阻10k"
+    # 多段文本中间出现：仅删除该句
+    assert clean_description("前段。" + B + "后段。") == "前段。后段。"
+    # 纯模板文案 → 清空为 None
+    assert clean_description(B) is None
+    # 空值透传
+    assert clean_description(None) is None
+    assert clean_description("普通描述") == "普通描述"

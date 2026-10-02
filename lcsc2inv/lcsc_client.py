@@ -50,6 +50,24 @@ NEXTDATA_PATTERN = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+# 国内站商品描述里的营销模板文案（固定整句，出现即删）
+LCSC_CN_DESC_BOILERPLATE = (
+    "提供高清引脚图、PCB焊盘图、3D模型及Datasheet数据手册，"
+    "支持选型与设计参考，正品现货，一站式元器件采购尽在立创商城。"
+)
+
+
+def clean_description(text: str | None) -> str | None:
+    """去掉国内站商品描述里的营销模板文案。
+
+    删除后若句尾残留逗号/空白一并清理；全空返回 None。
+    """
+    if not text:
+        return text
+    s = text.replace(LCSC_CN_DESC_BOILERPLATE, "")
+    s = re.sub(r"[，,]\s*$", "", s).strip()
+    return s or None
+
 
 def _looks_like_waf(html: str) -> bool:
     """立创国内站常见阿里云 WAF 挑战页，不含商品数据。"""
@@ -244,7 +262,7 @@ def parse_ldjson(html: str, *, page_url: str | None = None) -> LCSCPart:
             sku=sku,
             mpn=(str(raw["mpn"]).strip() if raw.get("mpn") else None),
             name=raw.get("name"),
-            description=raw.get("description"),
+            description=clean_description(raw.get("description")),
             brand=brand,
             category=raw.get("category"),
             image_urls=list(raw.get("image") or []),
@@ -283,7 +301,7 @@ def _from_nextdata(nd: dict[str, Any], *, page_url: str | None) -> LCSCPart:
         sku=sku,
         mpn=nd.get("productModel"),
         name=nd.get("productTitleEn") or nd.get("productTitle"),
-        description=nd.get("productIntroEn") or nd.get("productDescEn"),
+        description=clean_description(nd.get("productIntroEn") or nd.get("productDescEn")),
         brand=Brand(name=str(brand_name)) if brand_name else None,
         category="/".join(filter(None, [nd.get("parentCatalogName"), nd.get("catalogName")])),
         image_urls=images,

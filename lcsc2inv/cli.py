@@ -26,7 +26,9 @@ from lcsc2inv.config import get_settings, load_yaml
 from lcsc2inv.inventree_writer import InvenTreeWriter, WriteOptions, WriteResult
 from lcsc2inv.lcsc_client import (
     Fetcher,
+    LCSC_CN_DESC_BOILERPLATE,
     LcscFetchError,
+    clean_description,
     default_fetcher,
     parse_lcsc_code,
 )
@@ -480,6 +482,65 @@ def backfill_package(
         f"\n[bold]回填完成[/bold]：需更新 {stats['todo']}、"
         f"已是最新 {stats['ok']}、LCSC 无封装 {stats['no_package']}、"
         f"抓取失败 {stats['fetch_failed']}、写入失败 {stats['errors']}"
+    )
+    if failed:
+        console.print("[red]失败明细（最多显示 20 条）:[/red]")
+        for line in failed[:20]:
+            console.print(f"  - {line}")
+
+
+# ---------------------------------------------------------------------------
+# clean-desc（遍历清理描述里的国内站营销模板文案）
+# ---------------------------------------------------------------------------
+
+
+@cli.command("clean-desc")
+@_dry_run_option
+@click.pass_context
+def clean_desc(ctx: click.Context, dry_run: bool | None) -> None:
+    """遍历 InvenTree 全部 Part，删除描述中的国内站营销模板文案。
+
+    目标文案（LCSC 国内站固定模板句）：
+    「提供高清引脚图、PCB焊盘图、3D模型及Datasheet数据手册，支持选型与
+    设计参考，正品现货，一站式元器件采购尽在立创商城。」
+
+    只改 description，幂等（重复执行无变化）；无需访问 LCSC。
+    """
+    _common_dry_run(ctx, dry_run)
+    api = _connect_inventree(token=ctx.obj.get("token"))
+    from inventree.part import Part  # 局部导入便于测试 patch
+
+    mode = "[DRY] " if get_settings().dry_run else ""
+    parts = Part.list(api)
+    console.print(f"{mode}共扫描 [bold]{len(parts)}[/bold] 个 Part…")
+
+    stats = {"cleaned": 0, "unchanged": 0, "errors": 0}
+    failed: list[str] = []
+    for p in parts:
+        ipn = (getattr(p, "IPN", None) or str(p.pk)).strip()
+        desc = getattr(p, "description", None) or ""
+        if LCSC_CN_DESC_BOILERPLATE not in desc:
+            stats["unchanged"] += 1
+            continue
+        new_desc = (clean_description(desc) or "")[:250]
+        if get_settings().dry_run:
+            stats["cleaned"] += 1
+            console.print(
+                f"[cyan]{ipn}: 将清理描述（{len(desc)} → {len(new_desc)} 字符）[/cyan]"
+            )
+            continue
+        try:
+            Part(api, p.pk).save({"description": new_desc})
+            stats["cleaned"] += 1
+            console.print(f"[green]{ipn}: ✓ 已清理[/green]")
+        except Exception as exc:  # noqa: BLE001 — 单个失败不阻断
+            stats["errors"] += 1
+            failed.append(f"{ipn}: {type(exc).__name__}: {exc}")
+            console.print(f"[red]{ipn}: 清理失败 {exc}[/red]")
+
+    console.print(
+        f"\n[bold]清理完成[/bold]：清理 {stats['cleaned']}、"
+        f"无匹配 {stats['unchanged']}、失败 {stats['errors']}"
     )
     if failed:
         console.print("[red]失败明细（最多显示 20 条）:[/red]")
