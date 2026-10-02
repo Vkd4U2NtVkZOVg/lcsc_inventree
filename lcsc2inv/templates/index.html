@@ -305,11 +305,15 @@
       <h2>淘宝商品导入</h2>
       <p class="dim" style="margin:4px 0 0;">
         在淘宝商品页<b>选好规格</b>后，浏览器菜单「另存为 → 网页（单个文件 .mhtml）」保存并上传。
+        <b>支持一次上传/拖入多个文件</b>，解析后逐行确认，批量创建多个零件。
         标题/价格/店铺/规格/参数/主图全部来自本地文件（图片离线可用，不回源淘宝）；
         确认后创建 InvenTree 器件（IPN 默认 <b>TB+商品ID</b>，可改）。
       </p>
-      <label>淘宝页面文件（.mhtml / .mht，可多选）</label>
-      <input type="file" id="t-file" accept=".mhtml,.mht" multiple>
+      <div id="t-drop" style="border:2px dashed var(--line);border-radius:10px;padding:14px;text-align:center;color:var(--dim);cursor:pointer;">
+        <b style="color:var(--brand);">拖拽 .mhtml 文件到此处</b>（可同时拖入多个，每个文件一个零件）<br>
+        <span style="font-size:12px;">或点击下方「选择文件」按住 Ctrl/Shift 多选</span><br>
+        <input type="file" id="t-file" accept=".mhtml,.mht" multiple style="margin-top:8px;">
+      </div>
       <div class="btns">
         <button class="btn mini" id="t-parse">解析预览</button>
       </div>
@@ -1296,6 +1300,38 @@ $("o-run").onclick = async function(){
 
 // ============ 淘宝 mhtml 导入 ============
 var tbItems = [];
+// 拖拽上传（支持多文件）
+(function(){
+  var drop = $("t-drop"), input = $("t-file");
+  ["dragenter", "dragover"].forEach(function(ev){
+    drop.addEventListener(ev, function(e){
+      e.preventDefault(); e.stopPropagation();
+      drop.style.borderColor = "var(--brand)";
+      drop.style.background = "#f0f3ff";
+    });
+  });
+  ["dragleave", "drop"].forEach(function(ev){
+    drop.addEventListener(ev, function(e){
+      e.preventDefault(); e.stopPropagation();
+      drop.style.borderColor = "var(--line)";
+      drop.style.background = "";
+    });
+  });
+  drop.addEventListener("drop", function(e){
+    var files = Array.prototype.slice.call(e.dataTransfer.files || [])
+      .filter(function(f){ return /\.mhtml?$/i.test(f.name); });
+    if(!files.length){
+      setStatus("t-parse-status", "请拖入 .mhtml / .mht 文件", "err");
+      return;
+    }
+    try{
+      var dt = new DataTransfer();
+      files.forEach(function(f){ dt.items.add(f); });
+      input.files = dt.files;
+    }catch(err){ /* 老浏览器不支持回填，直接解析 */ }
+    $("t-parse").click();
+  });
+})();
 function tbShorten(url){
   if(!url) return "-";
   var tail = url.split("/").pop().split("?")[0];
