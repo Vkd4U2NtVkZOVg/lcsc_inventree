@@ -378,6 +378,45 @@ class TestTaobaoEndpoints:
         assert rv.status_code == 404
         assert "不存在" in rv.get_json()["error"]
 
+    def test_import_disk_fallback_after_eviction(self, taobao_writer):
+        """内存 LRU 被驱逐/服务重启后，导入可从磁盘暂存重新解析。"""
+        client, writer = taobao_writer
+        token = self._upload(client).get_json()["items"][0]["token"]
+        from lcsc2inv import web as web_mod
+
+        # 原始 mhtml 已落盘（含元信息）
+        assert (web_mod._taobao_disk_dir() / f"{token}.mhtml").exists()
+        # 模拟内存驱逐
+        with web_mod._taobao_cache_lock:
+            web_mod._taobao_cache.clear()
+        rv = client.post("/api/taobao/import", json={
+            "rows": [{"token": token, "ipn": "TB111222333"}],
+        })
+        d = rv.get_json()
+        assert d["results"][0]["ok"] is True
+        kwargs = writer.upsert_custom_part.call_args.kwargs
+        # 重新解析的内容与首次一致
+        assert kwargs["name"] == "测试电阻 0805 10kΩ"
+
+    def test_parse_sweeps_stale_disk_uploads(self, taobao_writer):
+        """超过 TTL（48h）的磁盘暂存在下次解析时被清理。"""
+        client, _ = taobao_writer
+        import os as _os
+        import time as _time
+
+        from lcsc2inv import web as web_mod
+
+        d = web_mod._taobao_disk_dir()
+        old = d / "tb99990.mhtml"
+        old.write_bytes(b"x")
+        stale = _time.time() - 49 * 3600
+        _os.utime(old, (stale, stale))
+        fresh = d / "tb99991.mhtml"
+        fresh.write_bytes(b"x")
+        self._upload(client)
+        assert not old.exists()
+        assert fresh.exists()
+
     def test_import_skip_and_missing_token(self, taobao_writer):
         client, writer = taobao_writer
         rv = client.post("/api/taobao/import", json={

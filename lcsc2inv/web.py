@@ -31,6 +31,7 @@ import itertools
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import threading
@@ -870,16 +871,72 @@ def api_order_import():
 # 淘宝 mhtml 导入
 # ---------------------------------------------------------------------------
 
-# 解析结果服务端缓存（token -> TaobaoItem），LRU 上限；导入时按 token 取图片字节
+# 解析结果服务端缓存（token -> TaobaoItem），LRU 上限；导入时按 token 取图片字节。
+# 内存被驱逐/重启后可从磁盘暂存（cache_dir/taobao_uploads/）重新解析，不会"过期"。
 _taobao_cache: "OrderedDict[str, TaobaoItem]" = OrderedDict()
 _taobao_cache_lock = threading.Lock()
 _taobao_seq = itertools.count(1)
-TAOBAO_CACHE_MAX = 12
+TAOBAO_CACHE_MAX = 24
 TAOBAO_MAX_FILES = 20
+TAOBAO_TOKEN_TTL_HOURS = 48
+_TAOBAO_TOKEN_RE = re.compile(r"tb\d+")
 
 
-def _taobao_cache_put(item: TaobaoItem) -> str:
-    token = f"tb{next(_taobao_seq)}"
+def _taobao_disk_dir() -> Path:
+    d = _get_settings().cache_dir_path / "taobao_uploads"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _taobao_disk_save(token: str, raw: bytes, filename: str | None) -> None:
+    """原始 mhtml 落盘 + 元信息 sidecar（供内存驱逐后重新解析）。"""
+    d = _taobao_disk_dir()
+    (d / f"{token}.mhtml").write_bytes(raw)
+    (d / f"{token}.meta.json").write_text(
+        json.dumps({"filename": filename or f"{token}.mhtml"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _taobao_disk_load(token: str) -> TaobaoItem | None:
+    """从磁盘暂存重新解析（token 需通过白名单校验防路径穿越）。"""
+    token = (token or "").strip()
+    if not _TAOBAO_TOKEN_RE.fullmatch(token):
+        return None
+    p = _taobao_disk_dir() / f"{token}.mhtml"
+    if not p.exists():
+        return None
+    meta: dict = {}
+    meta_p = _taobao_disk_dir() / f"{token}.meta.json"
+    if meta_p.exists():
+        try:
+            meta = json.loads(meta_p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            meta = {}
+    try:
+        return parse_mhtml(p.read_bytes(),
+                           source_filename=meta.get("filename") or p.name)
+    except (ValueError, OSError):
+        return None
+
+
+def _taobao_disk_sweep() -> None:
+    """清理超过 TTL 的磁盘暂存（每次解析时顺带执行）。"""
+    cutoff = time.time() - TAOBAO_TOKEN_TTL_HOURS * 3600
+    try:
+        for f in _taobao_disk_dir().iterdir():
+            try:
+                if f.is_file() and f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
+def _taobao_cache_put(item: TaobaoItem, token: str | None = None) -> str:
+    if token is None:
+        token = f"tb{next(_taobao_seq)}"
     with _taobao_cache_lock:
         _taobao_cache[token] = item
         while len(_taobao_cache) > TAOBAO_CACHE_MAX:
@@ -917,15 +974,18 @@ def api_taobao_parse():
         return jsonify({"ok": False, "error": "缺少 file(s) 字段（.mhtml 上传）"}), 400
 
     items = []
+    _taobao_disk_sweep()
     for f in files:
         if not f or not f.filename:
             continue
         try:
-            item = parse_mhtml(f.read(), source_filename=f.filename)
+            raw = f.read()
+            item = parse_mhtml(raw, source_filename=f.filename)
         except ValueError as exc:
             items.append({"ok": False, "filename": f.filename, "error": str(exc)})
             continue
         token = _taobao_cache_put(item)
+        _taobao_disk_save(token, raw, item.source_filename)
         img_url = item.main_image_url()
         items.append({
             "ok": True,
@@ -1021,7 +1081,13 @@ def api_taobao_import():
             with _taobao_cache_lock:
                 item = _taobao_cache.get(token)
             if item is None:
-                out["error"] = "解析结果已过期，请重新上传 mhtml"
+                # 内存 LRU 被驱逐 / 服务重启 → 从磁盘暂存重新解析
+                item = _taobao_disk_load(token)
+                if item is not None:
+                    _taobao_cache_put(item, token=token)
+            if item is None:
+                out["error"] = ("解析结果不存在或已过期（暂存保留 "
+                                f"{TAOBAO_TOKEN_TTL_HOURS} 小时），请重新上传 mhtml")
                 results.append(out)
                 continue
 
