@@ -21,8 +21,10 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-# 项目内置 config 目录
-_DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
+# 项目内置 config 目录；优先读 LCSC_CONFIG_DIR 环境变量（Docker 部署时指向挂载/拷贝目录）
+_DEFAULT_CONFIG_DIR = Path(
+    os.environ.get("LCSC_CONFIG_DIR") or (Path(__file__).resolve().parent.parent / "config")
+)
 
 
 def _to_bool(s: str | bool | None, default: bool = False) -> bool:
@@ -48,6 +50,13 @@ class Settings:
     inventree_password: str = ""
     inventree_supplier_name: str = "LCSC Electronics"
 
+    # InvenTree 数据库一键备份（依赖宿主机 InvenTree 也是 Docker 部署）
+    # 备份时通过挂载的 /var/run/docker.sock 进入该容器执行原生备份命令
+    inventree_backup_container: str = ""            # InvenTree 容器名（必需）
+    inventree_backup_cmd: str = "invoke backup"     # 容器内备份命令（默认全库+media）
+    inventree_backup_src_dir: str = "/home/inventree/data/backup"  # 容器内产物目录
+    inventree_backup_storage: str = "/backup"       # 本容器对外暴露目录（bind-mount 到宿主机）
+
     # LCSC 行为
     lcsc_cache_enabled: bool = True
     lcsc_cache_dir: str = "~/.cache/lcsc2inventree"
@@ -60,6 +69,9 @@ class Settings:
     )
     # 图片上传：默认开启。Part 已 image 则跳过；--update 强制重传
     lcsc_upload_image: bool = True
+
+    # 抓取完成后是否打开浏览器
+    open_browser: bool = False
 
     # 行为开关
     category_match_ratio_limit: int = 75
@@ -89,6 +101,12 @@ def get_settings(*, force_reload: bool = False) -> Settings:
         inventree_username=os.getenv("INVENTREE_USERNAME", ""),
         inventree_password=os.getenv("INVENTREE_PASSWORD", ""),
         inventree_supplier_name=os.getenv("INVENTREE_SUPPLIER_NAME", "LCSC Electronics"),
+        inventree_backup_container=os.getenv("INVENTREE_BACKUP_CONTAINER", ""),
+        inventree_backup_cmd=os.getenv("INVENTREE_BACKUP_CMD", "invoke backup"),
+        inventree_backup_src_dir=os.getenv(
+            "INVENTREE_BACKUP_SRC_DIR", "/home/inventree/data/backup"
+        ),
+        inventree_backup_storage=os.getenv("INVENTREE_BACKUP_STORAGE", "/backup"),
         lcsc_cache_enabled=_to_bool(os.getenv("LCSC_CACHE_ENABLED"), True),
         lcsc_cache_dir=os.getenv("LCSC_CACHE_DIR", "~/.cache/lcsc2inventree"),
         lcsc_cache_ttl_days=int(os.getenv("LCSC_CACHE_TTL_DAYS", "7")),
@@ -102,6 +120,7 @@ def get_settings(*, force_reload: bool = False) -> Settings:
         category_match_ratio_limit=int(os.getenv("CATEGORY_MATCH_RATIO_LIMIT", "75")),
         dry_run=_to_bool(os.getenv("DRY_RUN"), False),
         lcsc_upload_image=_to_bool(os.getenv("LCSC_UPLOAD_IMAGE"), True),
+        open_browser=_to_bool(os.getenv("LCSC_OPEN_BROWSER"), False),
     )
     _cached = s
     return s

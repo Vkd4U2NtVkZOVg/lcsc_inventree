@@ -38,7 +38,9 @@ LCSC_PRODUCT_URL_TEMPLATE = "https://www.lcsc.com/product-detail/{code}.html"
 # 国内立创商城（item.szlcsc.com）使用数字内部 ID，不接受 C-code 直链
 LCSC_CN_PRODUCT_URL_TEMPLATE = "https://item.szlcsc.com/{numeric_id}.html"
 LCSC_URL_PATTERN = re.compile(r"/product-detail/C(\d+)\.html", re.IGNORECASE)
-LCSC_CN_URL_PATTERN = re.compile(r"item\.szlcsc\.com/(\d+)\.html", re.IGNORECASE)
+LCSC_CN_URL_PATTERN = re.compile(
+    r"item\.szlcsc\.com/(?:mro/)?(\d+)\.html", re.IGNORECASE
+)
 LDJSON_PATTERN = re.compile(
     r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
     re.DOTALL | re.IGNORECASE,
@@ -47,6 +49,12 @@ NEXTDATA_PATTERN = re.compile(
     r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
     re.DOTALL | re.IGNORECASE,
 )
+
+
+def _looks_like_waf(html: str) -> bool:
+    """立创国内站常见阿里云 WAF 挑战页，不含商品数据。"""
+    markers = ("aliyun_waf", "acw_sc__v2", "renderData")
+    return any(marker in html for marker in markers)
 
 
 def parse_lcsc_code(value: str) -> str:
@@ -166,6 +174,34 @@ def _additional_props(raw: list[Any]) -> list[PropertyValue]:
     return out
 
 
+def _extract_cn_footprint(soup: BeautifulSoup) -> str | None:
+    """国内站商品页的「商品封装」在 <dt>商品封装</dt><dd>…</dd> 参数表里。
+
+    ld+json / __NEXT_DATA__ 都不带该字段，只能从 SSR HTML 抽取。
+    """
+    for dt in soup.find_all("dt"):
+        if "封装" not in dt.get_text(strip=True):
+            continue
+        dd = dt.find_next_sibling("dd")
+        if dd is None:
+            continue
+        # dd 文本可能带零宽空格（如 "弯插\u200b"）
+        value = dd.get_text(strip=True).replace("\u200b", "").strip()
+        if value:
+            return value
+    return None
+
+
+def _with_cn_footprint(part: LCSCPart, soup: BeautifulSoup) -> LCSCPart:
+    """页面参数表里有封装而结构化数据没有时，补进 additional_properties。"""
+    if part.package:
+        return part
+    value = _extract_cn_footprint(soup)
+    if value:
+        part.additional_properties.append(PropertyValue(name="封装", value=value))
+    return part
+
+
 def parse_ldjson(html: str, *, page_url: str | None = None) -> LCSCPart:
     """将 LCSC 商品页 HTML 解析为 `LCSCPart`。
 
@@ -179,7 +215,7 @@ def parse_ldjson(html: str, *, page_url: str | None = None) -> LCSCPart:
         nd = _extract_nextdata_dict(soup)
         if nd is None:
             raise ValueError("HTML 中找不到 application/ld+json / __NEXT_DATA__")
-        return _from_nextdata(nd, page_url=page_url)
+        return _with_cn_footprint(_from_nextdata(nd, page_url=page_url), soup)
 
     sku = str(raw.get("sku") or "").strip()
     if not sku:
@@ -203,18 +239,21 @@ def parse_ldjson(html: str, *, page_url: str | None = None) -> LCSCPart:
     else:
         datasheet_url = None
 
-    return LCSCPart(
-        sku=sku,
-        mpn=(str(raw["mpn"]).strip() if raw.get("mpn") else None),
-        name=raw.get("name"),
-        description=raw.get("description"),
-        brand=brand,
-        category=raw.get("category"),
-        image_urls=list(raw.get("image") or []),
-        additional_properties=_additional_props(raw.get("additionalProperty") or []),
-        offer=offer,
-        datasheet_url=datasheet_url,
-        page_url=page_url or (offer.url if offer and offer.url else product_url(sku)),
+    return _with_cn_footprint(
+        LCSCPart(
+            sku=sku,
+            mpn=(str(raw["mpn"]).strip() if raw.get("mpn") else None),
+            name=raw.get("name"),
+            description=raw.get("description"),
+            brand=brand,
+            category=raw.get("category"),
+            image_urls=list(raw.get("image") or []),
+            additional_properties=_additional_props(raw.get("additionalProperty") or []),
+            offer=offer,
+            datasheet_url=datasheet_url,
+            page_url=page_url or (offer.url if offer and offer.url else product_url(sku)),
+        ),
+        soup,
     )
 
 
@@ -358,14 +397,17 @@ class Fetcher:
     # -- fetch ----------------------------------------------------------
 
     def fetch(self, code: str) -> LCSCPart:
-        """抓取并解析单个 LCSC C-code。优先缓存。"""
-        code = parse_lcsc_code(code)
+        """抓取并解析单个 LCSC C-code 或商品 URL。优先缓存。"""
+        raw_value = code.strip() if isinstance(code, str) else code
+        code = parse_lcsc_code(raw_value)
+        # 国内 MRO 页面使用 /mro/<id>.html；规范化为 CN:<id> 后不能再丢失该路径。
+        source_url = raw_value if isinstance(raw_value, str) and "/mro/" in raw_value.lower() else None
         cached_html = self._cache_read(code)
         if cached_html is not None:
             logger.debug("缓存命中 %s", code)
-            return parse_ldjson(cached_html, page_url=product_url(code))
+            return parse_ldjson(cached_html, page_url=source_url or product_url(code))
 
-        url = product_url(code)
+        url = source_url or product_url(code)
         html = self._fetch_html(url)
         self._cache_write(code, html)
         return parse_ldjson(html, page_url=url)
@@ -390,10 +432,37 @@ class Fetcher:
                 if resp.status_code >= 400:
                     raise LcscFetchError(f"HTTP {resp.status_code} url={url}")
                 if "application/ld+json" not in resp.text and "__NEXT_DATA__" not in resp.text:
+                    if _looks_like_waf(resp.text):
+                        return self._fetch_html_browser(url)
                     raise LcscFetchError(f"页面缺 ld+json / __NEXT_DATA__，可能被反爬 url={url}")
                 return resp.text
         # 不应该到这里，但保险起见
         raise LcscFetchError(f"多次重试失败 url={url} last={last_exc}")
+
+    def _fetch_html_browser(self, url: str) -> str:
+        """国内站 WAF 挑战页需要执行 JS 后才能拿到商品 HTML。"""
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise LcscFetchError(
+                "国内站返回了反爬挑战页，但当前环境没有 Playwright 浏览器"
+            ) from exc
+        if getattr(self, "_playwright", None) is None:
+            self._playwright = sync_playwright().start()
+            self._browser = self._playwright.chromium.launch(headless=True)
+        page = self._browser.new_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_function(
+                "() => document.documentElement.outerHTML.includes('application/ld+json') || document.documentElement.outerHTML.includes('__NEXT_DATA__')",
+                timeout=12000,
+            )
+            html = page.content()
+        finally:
+            page.close()
+        if "application/ld+json" not in html and "__NEXT_DATA__" not in html:
+            raise LcscFetchError(f"浏览器抓取后仍缺少商品数据 url={url}")
+        return html
 
     # -- image download -------------------------------------------------
 

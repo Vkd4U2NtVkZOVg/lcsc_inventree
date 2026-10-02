@@ -40,15 +40,18 @@ class CategoryMatch:
     candidates: list[tuple[str, int]] = field(default_factory=list)
 
 
-def _load_direct_map() -> dict[str, list[str]]:
+def _load_direct_map(data: dict[str, Any] | None = None) -> dict[str, list[str]]:
     """加载 `config/lcsc_categories.yaml`，展平为 `lcsc_category -> [path...]`。
 
     YAML 结构（见配置文件）：
         Capacitors:
             _default: ["Passive", "Capacitors"]
             Ceramic Capacitors: ["Passive", "Capacitors", "Ceramic Capacitors (MLCC)"]
+
+    Args:
+        data: 可选的类别映射 dict；提供时取代磁盘上的 YAML（用于 /api/preview 预览）。
     """
-    raw = load_yaml("lcsc_categories.yaml")
+    raw = data if data is not None else load_yaml("lcsc_categories.yaml")
     flat: dict[str, list[str]] = {}
     for top, cfg in raw.items():
         if not isinstance(cfg, dict):
@@ -64,9 +67,9 @@ def _load_direct_map() -> dict[str, list[str]]:
     return flat
 
 
-def _all_paths_from_yaml() -> list[list[str]]:
+def _all_paths_from_yaml(data: dict[str, Any] | None = None) -> list[list[str]]:
     """提取所有出现在 YAML 中的类别 path，作为模糊匹配的候选池。"""
-    raw = load_yaml("lcsc_categories.yaml")
+    raw = data if data is not None else load_yaml("lcsc_categories.yaml")
     out: list[list[str]] = []
     seen: set[str] = set()
     for top, cfg in raw.items():
@@ -177,15 +180,22 @@ def _fuzzy_match(part: LCSCPart, all_paths: list[list[str]], *, create_missing_c
     )
 
 
-def match(part: LCSCPart, *, create_missing_category: bool = False) -> CategoryMatch:
+def match(
+    part: LCSCPart,
+    *,
+    create_missing_category: bool = False,
+    category_data: dict[str, Any] | None = None,
+) -> CategoryMatch:
     """对 LCSC 商品做三层匹配，返回最佳 `CategoryMatch`。
 
     Args:
         create_missing_category: True 时，本地无匹配的 LCSC 分类会返回 "__create:<path>" 格式，
             表示调用方应创建该分类。
+        category_data: 可选的类别映射 dict；提供时取代磁盘上的 `lcsc_categories.yaml`
+            （用于 /api/preview 无写入预览）。
     """
-    direct_map = _load_direct_map()
-    all_paths = _all_paths_from_yaml()
+    direct_map = _load_direct_map(category_data)
+    all_paths = _all_paths_from_yaml(category_data)
 
     # Tier 1: direct
     if part.category and part.category in direct_map:

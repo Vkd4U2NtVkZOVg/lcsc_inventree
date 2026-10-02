@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from lcsc2inv.mapping import clean_parameter_value, to_inventree_parameters
+from lcsc2inv.lcsc_models import LCSCPart, PropertyValue
+from lcsc2inv.mapping import clean_parameter_value, to_inventree_parameters, to_part_notes
 
 
 def test_clean_basic():
@@ -65,3 +66,32 @@ def test_to_inventree_parameters_optoisolator(optoisolator):
     assert "Isolation Voltage" in params
     assert params["Isolation Voltage"]["value"] == "5kV"
     assert "Operating Temperature" in params
+
+
+def _cn_part() -> LCSCPart:
+    """国内站风格：封装参数名是「封装」，类别是中文（不在 YAML 中）。"""
+    return LCSCPart(
+        sku="C386757",
+        mpn="R-RJ45R08P-C000",
+        category="以太网连接器(RJ45 RJ11)",
+        additional_properties=[PropertyValue(name="封装", value="弯插")],
+    )
+
+
+def test_package_mapping_accepts_chinese_name():
+    """field_map Base 的 Package 候选包含「封装」，国内站参数也能映射。"""
+    params = to_inventree_parameters(_cn_part(), category_top=None, category_sub=None)
+    assert set(params) == {"Package"}
+    assert params["Package"] == {"value": "弯插", "raw": "弯插"}
+
+
+def test_part_notes_includes_package():
+    """Part.notes 应包含封装行，便于人工核对。"""
+    notes = to_part_notes(_cn_part())
+    assert "- **Package**: 弯插" in notes
+
+
+def test_part_notes_without_package():
+    """没有封装时不输出 Package 行。"""
+    part = LCSCPart(sku="C1")
+    assert "- **Package**" not in to_part_notes(part)

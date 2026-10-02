@@ -11,15 +11,17 @@ from __future__ import annotations
 
 import csv
 import logging
-import sys
+import re
+import webbrowser
 from pathlib import Path
-from typing import Iterable
+from typing import Any
 
 import click
 from rich.console import Console
 from rich.table import Table
 
 from lcsc2inv.categorizer import match as categorizer_match
+from lcsc2inv.client import build_inventree_api
 from lcsc2inv.config import get_settings, load_yaml
 from lcsc2inv.inventree_writer import InvenTreeWriter, WriteOptions, WriteResult
 from lcsc2inv.lcsc_client import (
@@ -45,29 +47,10 @@ def _setup_logging(verbose: bool) -> None:
 
 def _connect_inventree(token: str | None = None):
     """构造 InvenTree API 客户端。"""
-    from inventree.api import InvenTreeAPI  # 延迟导入（CLI 不一定需要）
-
-    s = get_settings()
-    if not s.inventree_url:
-        raise click.ClickException("INVENTREE_URL 未设置（请复制 .env.example → .env 并填写）")
-    # inventree-python 0.14+ 把参数名从 server 改成了 host；这里兼容两个版本
-    kwargs: dict = {"host": s.inventree_url}
-    if token or s.inventree_token:
-        kwargs["token"] = token or s.inventree_token
-    elif s.inventree_username and s.inventree_password:
-        kwargs["username"] = s.inventree_username
-        kwargs["password"] = s.inventree_password
-    else:
-        raise click.ClickException(
-            "需要 INVENTREE_TOKEN 或 INVENTREE_USERNAME/INVENTREE_PASSWORD"
-        )
-    # 旧版本用 server=；如果传 host= 报 unexpected kwarg，则回退
     try:
-        api = InvenTreeAPI(**kwargs)
-    except TypeError:
-        kwargs = {("server" if k == "host" else k): v for k, v in kwargs.items()}
-        api = InvenTreeAPI(**kwargs)
-    return api
+        return build_inventree_api(token=token)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _print_dry_run_preview(part: LCSCPart) -> None:
@@ -185,7 +168,7 @@ def import_cmd(
         force_image_upload=update,  # --update 时强制覆盖图片
     )
     result = writer.upsert_part(part, options=opts, create_missing_category=create_missing_category)
-    _print_result(code, result)
+    _print_result(code, result, batch_mode=False)
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +252,7 @@ def _import_one(
         force_image_upload=update,
     )
     result = writer.upsert_part(part, options=opts, create_missing_category=create_missing_category)
-    _print_result(code, result)
+    _print_result(code, result, batch_mode=True)
 
 
 def _run_batch_threaded(
@@ -285,7 +268,7 @@ def _run_batch_threaded(
 
     console.print("[yellow]并发模式下仍顺序执行（InvenTree SDK 非线程安全）[/yellow]")
     for r in rows:
-        _import_one(writer, fetcher, r, update, no_stock)
+        _import_one(writer, fetcher, r, update, stock, create_missing_category)
 
 
 def _read_csv(path: Path) -> list[dict]:
@@ -301,7 +284,14 @@ def _read_csv(path: Path) -> list[dict]:
         return out
 
 
-def _print_result(code: str, result: WriteResult) -> None:
+def _print_result(code: str, result: WriteResult, *, batch_mode: bool = False) -> None:
+    """打印导入结果。
+    
+    Args:
+        code: LCSC C-code
+        result: 导入结果
+        batch_mode: 是否在批量导入模式下（批量模式下不打开浏览器）
+    """
     if not result.ok():
         msg = "; ".join(result.errors) or "未知错误"
         console.print(f"[red]{code}: 失败 — {msg}[/red]")
@@ -319,6 +309,183 @@ def _print_result(code: str, result: WriteResult) -> None:
         f"{('[created: ' + created + ']') if created else ''}  {img_state}"
     )
 
+    # 抓取完成后打开浏览器（仅在非批量模式下）
+    if not batch_mode:
+        _open_browser_if_enabled(code, result)
+
+
+def _open_browser_if_enabled(code: str, result: WriteResult) -> None:
+    """根据配置决定是否在浏览器中打开新建 Part 的详情页。"""
+    settings = get_settings()
+    if not settings.open_browser:
+        return
+
+    if not result.ok() or result.part_pk is None:
+        return
+
+    try:
+        # 构造 Part 详情页 URL：INVENTREE_URL + /part/ + part_pk
+        base_url = settings.inventree_url.rstrip("/")
+        part_url = f"{base_url}/part/{result.part_pk}/"
+
+        logger.info("准备打开浏览器: %s", part_url)
+        # 使用 new=2 在新标签页打开
+        webbrowser.open(part_url, new=2)
+    except Exception as exc:
+        logger.warning("无法打开浏览器: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# backfill-package（一键回填封装信息）
+# ---------------------------------------------------------------------------
+
+# InvenTree Part.IPN 中识别 LCSC 器件：国际站 C28323 / 国内站 CN:360864
+_LCSC_IPN_RE = re.compile(r"(?:C\d+|CN:\d+)")
+
+
+@cli.command("backfill-package")
+@_dry_run_option
+@click.option("--limit", type=int, default=None, help="只处理前 N 个 Part（测试用）")
+@click.pass_context
+def backfill_package(
+    ctx: click.Context, dry_run: bool | None, limit: int | None
+) -> None:
+    """为 InvenTree 中所有 LCSC 导入的器件回填封装信息。
+
+    扫描 IPN 为 LCSC 编号（C123456 / CN:123456）的 Part，从 LCSC 重新抓取
+    封装数据（1 req/s 限速 + 本地 HTML 缓存，重复执行很快），然后：
+
+    \b
+    - 描述尾部追加（封装：xxx）——基于 InvenTree 现有描述修改，不覆盖手工改动，
+      描述里已含该封装串时跳过；
+    - 写 `Package` 参数（模板不存在则自动创建）；
+    - keywords 追加封装串。
+    """
+    _common_dry_run(ctx, dry_run)
+    settings = get_settings()
+    api = _connect_inventree(token=ctx.obj.get("token"))
+    from inventree.part import Part  # 局部导入便于测试 patch
+
+    writer = InvenTreeWriter(api, settings)
+    fetcher = default_fetcher(settings)
+
+    # 1. 扫描 InvenTree，收集 IPN 是 LCSC 编号的 Part
+    targets: list[dict[str, Any]] = []
+    for p in Part.list(api):
+        ipn = (getattr(p, "IPN", None) or "").strip()
+        if not _LCSC_IPN_RE.fullmatch(ipn):
+            continue
+        targets.append(
+            {
+                "pk": p.pk,
+                "ipn": ipn,
+                "description": getattr(p, "description", None) or "",
+                "keywords": getattr(p, "keywords", None) or "",
+            }
+        )
+    targets.sort(key=lambda t: t["ipn"])
+    if limit is not None:
+        targets = targets[:limit]
+    if not targets:
+        console.print("[yellow]没有找到 IPN 为 LCSC 编号的 Part，无可回填。[/yellow]")
+        return
+
+    mode = "[DRY] " if settings.dry_run else ""
+    console.print(
+        f"{mode}共找到 [bold]{len(targets)}[/bold] 个 LCSC 器件，开始回填封装…"
+    )
+
+    stats = {"todo": 0, "ok": 0, "no_package": 0, "fetch_failed": 0, "errors": 0}
+    failed: list[str] = []
+    total = len(targets)
+    for i, t in enumerate(targets, 1):
+        code = t["ipn"]
+        try:
+            part = fetcher.fetch(code)
+        except LcscFetchError as exc:
+            stats["fetch_failed"] += 1
+            failed.append(f"{code}: 抓取失败 {exc}")
+            console.print(f"[red][{i}/{total}] {code}: 抓取失败 {exc}[/red]")
+            continue
+
+        package = part.package
+        if not package:
+            stats["no_package"] += 1
+            console.print(f"[dim][{i}/{total}] {code}: LCSC 无封装数据，跳过[/dim]")
+            continue
+
+        # 2. 基于 InvenTree 现有值计算变更（不覆盖手工修改）
+        new_desc = InvenTreeWriter._with_package_suffix(t["description"], package)[:250]
+        # keywords：封装值可能自带逗号（如 Through Hole,P=3.4mm），
+        # 用整体子串判断避免重复追加，并顺带清洗历史重复
+        kws = InvenTreeWriter._clean_keywords(t["keywords"])
+        if package.lower() not in (t["keywords"] or "").lower():
+            kws.append(package)
+        new_kw = ",".join(kws)
+
+        payload: dict[str, Any] = {}
+        if new_desc != t["description"]:
+            payload["description"] = new_desc
+        if new_kw != t["keywords"]:
+            payload["keywords"] = new_kw
+
+        # 参数现状（只读查询；dry-run 也查，保证预览真实）
+        param_cur = writer.get_package_parameter(part_pk=t["pk"])
+        param_pending = param_cur != package
+
+        if settings.dry_run:
+            stats["todo"] += 1
+            if payload and param_pending:
+                console.print(
+                    f"[cyan][{i}/{total}] {code}: 封装 {package} → "
+                    f"描述/keywords + Package 参数 将更新[/cyan]"
+                )
+            elif payload:
+                console.print(
+                    f"[cyan][{i}/{total}] {code}: 封装 {package} → "
+                    f"仅描述/keywords 将更新[/cyan]"
+                )
+            elif param_pending:
+                console.print(
+                    f"[cyan][{i}/{total}] {code}: 封装 {package} → "
+                    f"仅补 Package 参数[/cyan]"
+                )
+            else:
+                stats["todo"] -= 1
+                stats["ok"] += 1
+            continue
+
+        # 3. 写入（幂等：重复执行无副作用）
+        try:
+            if payload:
+                Part(api, t["pk"]).save(payload)
+            if param_pending:
+                if not writer.set_package_parameter(part_pk=t["pk"], value=package):
+                    raise RuntimeError("Package 参数模板不可用（查询/创建失败）")
+            if payload or param_pending:
+                stats["todo"] += 1
+                console.print(
+                    f"[green][{i}/{total}] {code}: {package} ✓ "
+                    f"{'描述/keywords ' if payload else ''}"
+                    f"{'+ Package 参数' if param_pending else ''}已回填[/green]"
+                )
+            else:
+                stats["ok"] += 1
+        except Exception as exc:  # noqa: BLE001 — 单个失败不阻断批量
+            stats["errors"] += 1
+            failed.append(f"{code}: 写入失败 {type(exc).__name__}: {exc}")
+            console.print(f"[red][{i}/{total}] {code}: 写入失败 {exc}[/red]")
+
+    console.print(
+        f"\n[bold]回填完成[/bold]：需更新 {stats['todo']}、"
+        f"已是最新 {stats['ok']}、LCSC 无封装 {stats['no_package']}、"
+        f"抓取失败 {stats['fetch_failed']}、写入失败 {stats['errors']}"
+    )
+    if failed:
+        console.print("[red]失败明细（最多显示 20 条）:[/red]")
+        for line in failed[:20]:
+            console.print(f"  - {line}")
+
 
 # ---------------------------------------------------------------------------
 # doctor
@@ -335,14 +502,14 @@ def doctor(ctx: click.Context) -> None:
     console.print(f"[bold]InvenTree URL:[/bold] {s.inventree_url}")
     try:
         api = _connect_inventree(token=ctx.obj.get("token"))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise click.ClickException(f"无法连接：{exc}") from exc
     # 1. /api/ ping
     try:
         from inventree.part import Part  # 探测
         n = len(Part.list(api))
         console.print(f"[green]✓ /api/part/ 可访问，当前 Part 数量: {n}[/green]")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise click.ClickException(f"/api/part/ 失败: {exc}") from exc
     # 2. supplier
     from inventree.company import Company, SupplierPart

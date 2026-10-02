@@ -95,6 +95,7 @@ def to_inventree_parameters(
     *,
     category_top: str | None = None,
     category_sub: str | None = None,
+    mapping_data: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, str]]:
     """根据 `config/field_map.yaml` 把 LCSC 规格参数映射为 InvenTree 参数。
 
@@ -104,10 +105,14 @@ def to_inventree_parameters(
             Value:      [Resistance, "Resistance Value"]
             Rated Power:["Power (Watts)", "Power Rating", "Rated Power"]
 
+    Args:
+        mapping_data: 可选的字段映射 dict；提供时取代磁盘上的 `field_map.yaml`
+            （用于 /api/preview 无写入预览）。
+
     Returns:
         {invenree_template_name: {"value": cleaned, "raw": original}}
     """
-    rules = load_yaml("field_map.yaml")
+    rules = mapping_data if mapping_data is not None else load_yaml("field_map.yaml")
     chain = _walk_chain(category_sub, category_top, rules)
 
     # 第一阶段：确定每个 InvenTree 模板对应的 LCSC 字段（取链路上第一个存在的候选）
@@ -148,6 +153,8 @@ def to_part_notes(
     lines: list[str] = []
     # InvenTree 1.2.6 的 notes 字段拒绝任何 HTML 标签（包括 markdown autolink `<url>`），
     # 所以只能用 `[text](url)` 这种纯 markdown 形式。
+    if part.package:
+        lines.append(f"- **Package**: {part.package}")
     if part.datasheet_url_resolved:
         lines.append(f"- **Datasheet**: [link]({part.datasheet_url_resolved})")
     if part.page_url:

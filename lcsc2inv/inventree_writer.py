@@ -36,8 +36,6 @@ from inventree.company import (
 from inventree.part import (
     Part,
     PartCategory,
-    PartParameter,
-    PartParameterTemplate,
 )
 from inventree.stock import StockItem
 
@@ -98,6 +96,8 @@ class WriteOptions:
     fetcher: Fetcher | None = None
     # --update 时为 True，强制覆盖已有图片
     force_image_upload: bool = False
+    # 显式指定封装（如订单导入解析出的「封装」列）；优先于 LCSC 数据里的 Package
+    footprint: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +117,6 @@ class InvenTreeWriter:
         self._supplier_cache: dict[str, int] = {}
         self._category_cache: dict[str, int] = {}
         self._template_cache: dict[str, int] = {}
-        self._warned_param_skip: bool = False
 
     # ---- public ---------------------------------------------------------
 
@@ -156,6 +155,7 @@ class InvenTreeWriter:
                 category_pk=cat_pk,
                 update=opts.update_existing,
                 dry_run=opts.dry_run,
+                package=self._resolve_package(part, opts.footprint),
             )
             result.part_pk = part_pk
             result.created["part"] = created
@@ -359,6 +359,7 @@ class InvenTreeWriter:
         category_pk: int | None,
         update: bool,
         dry_run: bool,
+        package: str | None = None,
     ) -> tuple[int | None, bool]:
         """创建或更新 Part；返回 (pk, created)。"""
         notes = to_part_notes(part)  # 仅 dry-run 用
@@ -371,9 +372,11 @@ class InvenTreeWriter:
         existing_pk = self._find_part_by_ipn(part.sku)
         payload: dict[str, Any] = {
             "name": part.name or part.mpn or part.sku,
-            "description": (part.description or "")[:250],
+            "description": self._with_package_suffix(
+                part.description or "", package
+            )[:250],
             "IPN": part.sku,
-            "keywords": self._build_keywords(part),
+            "keywords": self._build_keywords(part, package=package),
             "link": part.page_url,
             "active": True,
             "purchaseable": True,
@@ -482,7 +485,49 @@ class InvenTreeWriter:
                 pass
 
     @staticmethod
-    def _build_keywords(part: LCSCPart) -> str:
+    def _resolve_package(part: LCSCPart, explicit: str | None = None) -> str | None:
+        """封装取值：显式指定（如订单导入的「封装」列）优先于 LCSC 参数表。"""
+        for cand in (explicit, part.package):
+            if cand and str(cand).strip():
+                return str(cand).strip()
+        return None
+
+    @staticmethod
+    def _clean_keywords(raw: str) -> list[str]:
+        """keywords 去重清洗：去空白、大小写不敏感去重、保序。
+
+        注意封装值本身可能含逗号（如 `Through Hole,P=3.4mm`），因此 keywords
+        必须按逗号切分去重后整体重建，否则同一封装会被重复追加。
+        """
+        seen: set[str] = set()
+        out: list[str] = []
+        for k in (raw or "").split(","):
+            k = k.strip()
+            if not k:
+                continue
+            key = k.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(k)
+        return out
+
+    @staticmethod
+    def _with_package_suffix(description: str, package: str | None) -> str:
+        """把封装追加到描述尾部，保证列表页/详情页直接可见。
+
+        描述里已包含该封装串时不重复追加。
+        """
+        if not package:
+            return description
+        if package.lower() in (description or "").lower():
+            return description
+        if not (description or "").strip():
+            return f"封装：{package}"
+        return f"{description}（封装：{package}）"
+
+    @staticmethod
+    def _build_keywords(part: LCSCPart, package: str | None = None) -> str:
         bits: list[str] = [part.sku]
         if part.mpn:
             bits.append(part.mpn)
@@ -490,9 +535,267 @@ class InvenTreeWriter:
             bits.append(part.manufacturer_name)
         if part.category_top:
             bits.append(part.category_top)
+        pkg = package or part.package
+        if pkg:
+            bits.append(pkg)
         return ",".join(b for b in bits if b)
 
+    # ---- 更新已有 Part --------------------------------------------------
+
+    def update_part_fields(
+        self,
+        part: LCSCPart,
+        *,
+        part_pk: int,
+        update_name: bool = False,
+        update_description: bool = True,
+        update_image: bool = True,
+        update_keywords: bool = True,
+        update_notes: bool = False,
+        update_parameters: bool = False,
+        footprint: str | None = None,
+        fetcher: Fetcher | None = None,
+    ) -> dict:
+        """用 LCSC 数据更新**已存在**的 Part（不新建、不动分类/厂商/库存）。
+
+        Args:
+            part: 从 LCSC 抓取的商品数据。
+            part_pk: 要更新的 InvenTree Part 主键。
+            update_*: 各字段开关；图片为强制重传（更新场景的核心诉求）；
+                名称默认不更新（避免覆盖自定义命名）。
+            footprint: 显式封装（如订单导入的「封装」列）；缺省用 LCSC 数据。
+
+        Returns:
+            {
+              "updated_fields": [...],   # 成功保存的 Part 字段名
+              "image": {"uploaded": bool, "skipped_reason": str|None,
+                        "url": str|None} | None,
+              "parameters": {"written": True} | None,
+              "errors": [str, ...],      # 字段级失败原因（部分成功也算）
+            }
+
+        Raises:
+            ValueError: part_pk 对应的 Part 不存在或无法访问。
+        """
+        try:
+            obj = Part(self.api, part_pk)
+            _ = obj.pk  # 触发加载，尽早暴露不存在的 pk
+        except Exception as exc:  # noqa: BLE001 — 统一转为清晰的 ValueError
+            raise ValueError(f"Part pk={part_pk} 不存在或无法访问: {exc}") from exc
+
+        out: dict = {
+            "updated_fields": [],
+            "image": None,
+            "parameters": None,
+            "errors": [],
+        }
+        package = self._resolve_package(part, footprint)
+
+        # 1) 简单文本字段（一次 save）
+        payload: dict[str, Any] = {}
+        if update_name:
+            # 与创建时一致的命名逻辑：LCSC 名称 → MPN → SKU
+            payload["name"] = part.name or part.mpn or part.sku
+        if update_description:
+            payload["description"] = self._with_package_suffix(
+                part.description or "", package
+            )[:250]
+        if update_keywords:
+            payload["keywords"] = self._build_keywords(part, package=package)
+        if update_notes:
+            payload["notes"] = to_part_notes(part)
+            payload["link"] = part.page_url
+        if payload:
+            try:
+                obj.save(payload)
+                out["updated_fields"] = sorted(payload.keys())
+            except Exception as exc:  # noqa: BLE001 — 字段级失败不阻断图片
+                out["errors"].append(f"字段保存失败: {type(exc).__name__}: {exc}")
+
+        # 2) 图片（强制重传；best-effort，失败记录 skip reason）
+        if update_image:
+            img_result = WriteResult()
+            self._upload_image(
+                part,
+                part_pk=part_pk,
+                result=img_result,
+                fetcher=fetcher,
+                force=True,
+            )
+            out["image"] = {
+                "uploaded": img_result.image_uploaded,
+                "skipped_reason": img_result.image_skipped_reason,
+                "url": img_result.image_url,
+            }
+
+        # 3) 参数（按 LCSC 分类映射模板；只写不删）
+        if update_parameters:
+            try:
+                match = categorizer_match(part, create_missing_category=False)
+                path = match.category_path or ""
+                top = path.split("/")[0] if path and not path.startswith("__") else None
+                sub = path.split("/", 2)[1] if path and "/" in path else None
+                self._write_parameters(
+                    part, category_top=top, category_sub=sub, part_pk=part_pk
+                )
+                out["parameters"] = {"written": True}
+            except Exception as exc:  # noqa: BLE001 — 参数失败不影响其它字段
+                out["errors"].append(f"参数写入失败: {type(exc).__name__}: {exc}")
+
+        return out
+
     # ---- parameters -----------------------------------------------------
+    # 参数相关操作直接走 REST API：当前 inventree-python 0.23.2 的
+    # MAX_API_VERSION=428 低于服务端 API 530，SDK 的 PartParameter* /
+    # PartParameterTemplate* 一律抛 NotImplementedError，静默跳过会导致
+    # 所有导入都写不上参数（这正是封装参数缺失的根因）。
+
+    def _rest(
+        self, method: str, path: str, *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+    ) -> tuple[int, Any]:
+        """直接调用 InvenTree REST API（绕过 SDK 版本门禁）。
+
+        Returns:
+            (status_code, 解析后的 JSON；非 JSON 响应为 None)
+        """
+        import requests
+
+        resp = requests.request(
+            method,
+            f"{self.settings.inventree_url.rstrip('/')}{path}",
+            params=params,
+            json=json,
+            headers={"Authorization": f"Token {self.settings.inventree_token}"},
+            timeout=20,
+        )
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        return resp.status_code, data
+
+    @staticmethod
+    def _rest_results(data: Any) -> list[dict[str, Any]]:
+        """兼容分页 dict 与裸 list 两种响应。"""
+        if isinstance(data, dict):
+            return data.get("results") or []
+        if isinstance(data, list):
+            return data
+        return []
+
+    def _param_api_style(self) -> str:
+        """探测参数 API 形态并缓存。
+
+        - 'new'：InvenTree 1.5+（模型迁到 common app，`/api/parameter/`，
+          字段 model_type/model_id/data）
+        - 'old'：旧版（`/api/part/parameter/`，字段 part/value）
+        """
+        if getattr(self, "_param_style", None):
+            return self._param_style
+        for style, probe in (
+            ("new", "/api/parameter/template/"),
+            ("old", "/api/part/parameter/template/"),
+        ):
+            code, _ = self._rest("GET", probe, params={"limit": 1})
+            if code == 200:
+                self._param_style = style
+                logger.info("InvenTree 参数 API 形态: %s (%s)", style, probe)
+                return style
+        # 两个端点都探测失败：按 new 处理，让具体错误在写入处暴露
+        self._param_style = "new"
+        return self._param_style
+
+    def _param_url(self, kind: str) -> str:
+        base = (
+            "/api/parameter/" if self._param_api_style() == "new"
+            else "/api/part/parameter/"
+        )
+        return f"{base}template/" if kind == "template" else base
+
+    def _param_link_payload(
+        self, part_pk: int, tpl_pk: int, value: str
+    ) -> dict[str, Any]:
+        if self._param_api_style() == "new":
+            return {"model_type": "part", "model_id": part_pk,
+                    "template": tpl_pk, "data": value}
+        return {"part": part_pk, "template": tpl_pk, "value": value}
+
+    def _list_part_parameters(self, part_pk: int) -> list[dict[str, Any]]:
+        """列出一个 Part 的全部参数，归一化为 [{pk, template, value}]。"""
+        params: dict[str, Any] = {"limit": 500}
+        if self._param_api_style() == "new":
+            params.update({"model_type": "part", "model_id": part_pk})
+        else:
+            params["part"] = part_pk
+        code, data = self._rest("GET", self._param_url("param"), params=params)
+        if code != 200:
+            raise RuntimeError(f"查询 Part 参数失败 HTTP {code}")
+        return [
+            {"pk": pp["pk"], "template": pp.get("template"),
+             "value": pp.get("data", pp.get("value") or "")}
+            for pp in self._rest_results(data)
+            if pp.get("template") is not None
+        ]
+
+    def _find_template(self, name: str, *, strict: bool = False) -> int | None:
+        """只读查询参数模板 pk。
+
+        strict=True：查询失败抛 RuntimeError（ensure 路径需要区分
+        「模板不存在」与「查询失败」，前者才允许创建）。
+        strict=False：查询失败返回 None（只读场景）。
+        """
+        code, data = self._rest(
+            "GET", self._param_url("template"), params={"limit": 1000}
+        )
+        if code != 200:
+            if strict:
+                raise RuntimeError(f"查询参数模板失败 HTTP {code}")
+            return None
+        for t in self._rest_results(data):
+            if t.get("name") == name:
+                return t["pk"]
+        return None
+
+    def _ensure_template(self, name: str) -> int | None:
+        """确保参数模板存在（REST 实现，兼容新旧端点）；失败返回 None。"""
+        if name in self._template_cache:
+            return self._template_cache[name]
+        try:
+            pk = self._find_template(name, strict=True)
+        except RuntimeError as exc:
+            logger.warning("%s name=%s", exc, name)
+            return None
+        if pk is not None:
+            self._template_cache[name] = pk
+            return pk
+        url = self._param_url("template")
+        body: dict[str, Any] = {"name": name,
+                                "description": "auto-created by lcsc2inventree"}
+        if self._param_api_style() == "new":
+            body.update({"units": "", "model_type": "part"})
+        code, data = self._rest("POST", url, json=body)
+        if code >= 400:
+            logger.warning("创建参数模板失败 HTTP %s name=%s: %s", code, name, data)
+            return None
+        self._template_cache[name] = data["pk"]
+        return data["pk"]
+
+    def get_package_parameter(self, *, part_pk: int) -> str | None:
+        """读取 Part 当前的 Package 参数值；模板或参数不存在返回 None。
+
+        只读：不会创建模板/参数（与 `_ensure_template` 的区别）。
+        """
+        tpl_pk = self._find_template("Package")
+        if tpl_pk is None:
+            return None
+        cur = next(
+            (pp for pp in self._list_part_parameters(part_pk)
+             if pp["template"] == tpl_pk),
+            None,
+        )
+        return cur["value"] if cur else None
 
     def _write_parameters(
         self,
@@ -507,79 +810,242 @@ class InvenTreeWriter:
         )
         if not params:
             return
-        # 1. 找出已存在的 parameter（按 template 名）
-        existing: dict[str, PartParameter] = {}
-        try:
-            for pp in PartParameter.list(self.api, part=part_pk):
-                tpl = getattr(pp, "template", None)
-                if tpl is None:
-                    continue
-                tpl_name = getattr(tpl, "name", None) if not isinstance(tpl, int) else None
-                if tpl_name:
-                    existing[tpl_name] = pp
-        except Exception:  # noqa: BLE001
-            pass
+        # {template_pk: (parameter_pk, value)}
+        existing = {
+            pp["template"]: (pp["pk"], pp["value"])
+            for pp in self._list_part_parameters(part_pk)
+        }
+        url = self._param_url("param")
+        value_field = "data" if self._param_api_style() == "new" else "value"
         for inv_name, body in params.items():
             tpl_pk = self._ensure_template(inv_name)
             if tpl_pk is None:
-                # SDK 客户端 MAX_API_VERSION < 服务端 api_version：客户端太旧。
-                # 不阻塞 Part/SupplierPart/Stock 写入；用 logger 一次性记录原因。
-                if not self._warned_param_skip:
-                    logger.warning(
-                        "PartParameterTemplate 在当前 inventree-python SDK (v%s, MAX_API_VERSION=%s) "
-                        "下不支持服务端的 API v%s；已跳过 PartParameter 写入。"
-                        "升级 inventree-python>=<next> 即可恢复。",
-                        getattr(PartParameterTemplate, "__version__", "?"),
-                        PartParameterTemplate.MAX_API_VERSION,
-                        getattr(self.api, "api_version", "?"),
-                    )
-                    self._warned_param_skip = True
                 continue
             value = body["value"]
-            if inv_name in existing:
-                try:
-                    existing[inv_name].save({"value": value})
-                except NotImplementedError:
-                    # 同上：PartParameter 的 SDK 也太旧
+            cur = existing.get(tpl_pk)
+            if cur is not None:
+                if cur[1] == value:
                     continue
+                code, _ = self._rest(
+                    "PATCH", f"{url}{cur[0]}/", json={value_field: value}
+                )
+                if code >= 400:
+                    raise RuntimeError(f"更新参数 {inv_name} 失败 HTTP {code}")
             else:
-                try:
-                    PartParameter.create(
-                        self.api,
-                        {"part": part_pk, "template": tpl_pk, "value": value},
-                    )
-                except NotImplementedError:
-                    continue
+                code, _ = self._rest(
+                    "POST", url,
+                    json=self._param_link_payload(part_pk, tpl_pk, value),
+                )
+                if code >= 400:
+                    raise RuntimeError(f"创建参数 {inv_name} 失败 HTTP {code}")
 
-    def _ensure_template(self, name: str) -> int | None:
-        """确保 PartParameterTemplate 存在；返回 pk。
+    def set_named_parameter(self, *, part_pk: int, name: str, value: str) -> bool:
+        """写入/更新单个命名参数（模板不存在则自动创建），不动其它参数。
 
-        客户端 SDK 太旧时返回 None（调用方据此跳过）。
+        Returns:
+            True=写入成功或值已一致；False=模板不可用（查询/创建失败）。
+        Raises:
+            RuntimeError: 参数列表/写入的 REST 调用失败。
         """
-        if name in self._template_cache:
-            return self._template_cache[name]
-        # 搜索现有
-        try:
-            for t in PartParameterTemplate.list(self.api):
-                if getattr(t, "name", None) == name:
-                    self._template_cache[name] = t.pk
-                    return t.pk
-        except NotImplementedError:
-            # SDK 客户端 MAX_API_VERSION < 服务端
-            self._template_cache[name] = None  # type: ignore[assignment]
-            return None
-        except Exception:  # noqa: BLE001
-            pass
-        # 创建
-        try:
-            obj = PartParameterTemplate.create(
-                self.api,
-                {"name": name, "description": "auto-created by lcsc2inventree"},
+        tpl_pk = self._ensure_template(name)
+        if tpl_pk is None:
+            return False
+        cur = next(
+            (pp for pp in self._list_part_parameters(part_pk)
+             if pp["template"] == tpl_pk),
+            None,
+        )
+        if cur is not None and cur["value"] == value:
+            return True
+        url = self._param_url("param")
+        value_field = "data" if self._param_api_style() == "new" else "value"
+        if cur is not None:
+            code, _ = self._rest(
+                "PATCH", f"{url}{cur['pk']}/", json={value_field: value}
             )
-        except NotImplementedError:
-            return None
-        self._template_cache[name] = obj.pk
-        return obj.pk
+        else:
+            code, _ = self._rest(
+                "POST", url, json=self._param_link_payload(part_pk, tpl_pk, value)
+            )
+        if code >= 400:
+            raise RuntimeError(f"写入参数 {name} 失败 HTTP {code}")
+        return True
+
+    def set_package_parameter(self, *, part_pk: int, value: str) -> bool:
+        """只写入/更新单个 `Package` 参数（回填封装用，不动其它参数）。"""
+        return self.set_named_parameter(part_pk=part_pk, name="Package", value=value)
+
+    # ---- 通用 upsert（淘宝导入等非 LCSC 来源）---------------------------
+
+    TAOBAO_SUPPLIER_DEFAULT = "淘宝"
+
+    def _upload_image_bytes(
+        self, *, part_pk: int, data: bytes, ext: str
+    ) -> tuple[bool, str | None]:
+        """把内存图片字节上传为 Part.image，返回 (uploaded, skip_reason)。
+
+        webp 一律转 jpg（InvenTree 对 webp 兼容性不稳）；其余格式原样上传。
+        """
+        path = self.settings.cache_dir_path / f"upload_part{part_pk}{ext}"
+        try:
+            if ext == ".webp":
+                try:
+                    from io import BytesIO
+
+                    from PIL import Image
+
+                    img = Image.open(BytesIO(data))
+                    if img.mode not in ("RGB", "L"):
+                        img = img.convert("RGB")
+                    path = path.with_suffix(".jpg")
+                    img.save(path, "JPEG", quality=90)
+                except ImportError:
+                    path.write_bytes(data)  # 无 Pillow：原样尝试
+            else:
+                path.write_bytes(data)
+            Part(self.api, part_pk).uploadImage(str(path))
+            return True, None
+        except Exception as exc:  # noqa: BLE001 — 图片失败不影响器件写入
+            logger.warning("图片上传失败 part_pk=%s: %s", part_pk, exc)
+            return False, f"upload-failed: {type(exc).__name__}"
+        finally:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def upsert_custom_part(
+        self,
+        *,
+        ipn: str,
+        name: str,
+        description: str = "",
+        notes: str | None = None,
+        keywords: str | None = None,
+        link: str | None = None,
+        category_pk: int | None = None,
+        manufacturer_name: str | None = None,
+        supplier_name: str | None = None,
+        sku: str | None = None,
+        price: float | None = None,
+        currency: str = "CNY",
+        parameters: dict[str, str] | None = None,
+        image_data: tuple[bytes, str] | None = None,
+        dry_run: bool = False,
+        update_existing: bool = False,
+        create_stock: bool = False,
+        quantity: int | None = None,
+        location_pk: int | None = None,
+    ) -> WriteResult:
+        """通用自定义器件 upsert（淘宝导入等非 LCSC 来源）。
+
+        - IPN 幂等：已存在且 update_existing=False → 直接返回（不改动）
+        - 价格：supplier_name + sku 建 SupplierPart + 单档价格
+        - parameters：{模板名: 值}，模板按需自动创建
+        - image_data：(字节, 扩展名)，webp 自动转 jpg
+        - create_stock + quantity：建一笔 StockItem（可指定货位，备注含采购价）
+        """
+        result = WriteResult()
+        existing_pk = self._find_part_by_ipn(ipn)
+        if existing_pk is not None and not update_existing:
+            result.part_pk = existing_pk
+            result.created["part"] = False
+            result.image_skipped_reason = "exists-no-update"
+            return result
+
+        if dry_run:
+            logger.info(
+                "[DRY] custom upsert ipn=%s name=%s existing=%s",
+                ipn, name, existing_pk,
+            )
+            return result
+
+        mfr_pk = self._ensure_manufacturer(manufacturer_name, dry_run=False)
+        result.manufacturer_pk = mfr_pk
+        sup_pk = self._ensure_supplier(supplier_name or self.TAOBAO_SUPPLIER_DEFAULT,
+                                       dry_run=False)
+        result.supplier_pk = sup_pk
+
+        payload: dict[str, Any] = {
+            "name": (name or ipn)[:100],
+            "description": (description or "")[:250],
+            "IPN": ipn,
+            "active": True,
+            "purchaseable": True,
+            "component": True,
+            "assembly": False,
+        }
+        if keywords:
+            payload["keywords"] = keywords
+        if link:
+            payload["link"] = link
+        if category_pk:
+            payload["category"] = category_pk
+        if notes:
+            payload["notes"] = notes
+
+        try:
+            if existing_pk is None:
+                obj = Part.create(self.api, payload)
+                part_pk = obj.pk
+                result.created["part"] = True
+            else:
+                Part(self.api, existing_pk).save(payload)
+                part_pk = existing_pk
+                result.created["part"] = False
+            result.part_pk = part_pk
+
+            # 图片（best-effort）
+            if image_data and part_pk:
+                data, ext = image_data
+                uploaded, reason = self._upload_image_bytes(
+                    part_pk=part_pk, data=data, ext=ext
+                )
+                result.image_uploaded = uploaded
+                result.image_skipped_reason = reason
+
+            # 参数（逐个写，单个失败不影响其余）
+            for pname, pvalue in (parameters or {}).items():
+                if not pname or not pvalue:
+                    continue
+                try:
+                    self.set_named_parameter(
+                        part_pk=part_pk, name=pname, value=str(pvalue)
+                    )
+                except RuntimeError as exc:
+                    result.errors.append(f"参数 {pname}: {exc}")
+
+            # SupplierPart + 单档价格
+            if sup_pk and part_pk:
+                sp_pk, sp_created = self._ensure_supplier_part(
+                    part_pk=part_pk,
+                    supplier_pk=sup_pk,
+                    sku=sku or ipn,
+                    manufacturer_part_pk=None,
+                    dry_run=False,
+                )
+                result.supplier_part_pk = sp_pk
+                result.created["supplier_part"] = sp_created
+                if sp_pk and price is not None:
+                    self._replace_price_breaks(
+                        sp_pk, [(1, price, currency)], dry_run=False
+                    )
+                # 库存（可选；要求已建 SupplierPart 才能挂采购价）
+                if create_stock and sp_pk and quantity and quantity > 0:
+                    result.stock_item_pk = self._ensure_stock(
+                        part_pk=part_pk,
+                        supplier_part_pk=sp_pk,
+                        quantity=quantity,
+                        price=price,
+                        currency=currency,
+                        dry_run=False,
+                        location_pk=location_pk,
+                        notes="淘宝导入",
+                    )
+        except Exception as exc:  # noqa: BLE001 — 统一收集到 errors
+            logger.exception("upsert_custom_part 失败 ipn=%s", ipn)
+            result.errors.append(f"{type(exc).__name__}: {exc}")
+        return result
 
     # ---- manufacturer_part / supplier_part -----------------------------
 
@@ -651,6 +1117,25 @@ class InvenTreeWriter:
 
     # ---- stock ---------------------------------------------------------
 
+    def add_stock(
+        self,
+        *,
+        part_pk: int,
+        quantity: int,
+        location_pk: int | None = None,
+        notes: str | None = None,
+    ) -> int:
+        """为已有 Part 新建一笔 StockItem（订单入库用），返回 stock_pk。
+
+        与 `_ensure_stock` 不同：不要求 supplier_part，可指定货位。
+        """
+        payload: dict[str, Any] = {"part": part_pk, "quantity": str(quantity)}
+        if location_pk:
+            payload["location"] = location_pk
+        if notes:
+            payload["notes"] = notes
+        return StockItem.create(self.api, payload).pk
+
     def _ensure_stock(
         self,
         *,
@@ -660,6 +1145,8 @@ class InvenTreeWriter:
         price: float | None,
         currency: str | None,
         dry_run: bool,
+        location_pk: int | None = None,
+        notes: str | None = None,
     ) -> int | None:
         if dry_run:
             return None
@@ -669,6 +1156,10 @@ class InvenTreeWriter:
             "quantity": quantity,
             "supplier_part": supplier_part_pk,
         }
+        if location_pk:
+            payload["location"] = location_pk
+        if notes:
+            payload["notes"] = notes
         if price is not None:
             payload["purchase_price"] = str(price)
             payload["purchase_price_currency"] = currency or "USD"

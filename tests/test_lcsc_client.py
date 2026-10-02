@@ -81,6 +81,7 @@ def test_parse_lcsc_code_cn():
     """国内站 URL / 纯数字 ID。"""
     from lcsc2inv.lcsc_client import parse_lcsc_code
     assert parse_lcsc_code("https://item.szlcsc.com/360864.html") == "CN:360864"
+    assert parse_lcsc_code("https://item.szlcsc.com/mro/1049789.html") == "CN:1049789"
     assert parse_lcsc_code("360864") == "CN:360864"
 
 
@@ -105,13 +106,14 @@ def test_chinese_site_fixture():
 
 
 def test_clean_chinese_site_no_params():
-    """国内站 ld+json 不含 additionalProperty（这是已知限制）。"""
+    """国内站 ld+json 不含 additionalProperty，但封装可从页面参数表抽取。"""
     from lcsc2inv.lcsc_client import load_fixture
     from lcsc2inv.mapping import to_inventree_parameters
     p = load_fixture(FIXTURE_DIR / "CN_360864.html")
     params = to_inventree_parameters(p, category_top=p.category_top, category_sub=p.category_sub)
-    # 类别是中文，不在 YAML 里，所以无参数映射
-    assert params == {}
+    # 类别是中文，不在 YAML 里；但 Base 链路始终有 Package 映射
+    assert set(params) == {"Package"}
+    assert params["Package"]["value"] == "弯插"
     assert p.mpn == "R-RJ45R08P-C000"
     assert p.brand.name == "Ckmtw(灿科盟)"
     # CNY + QuantitativeValue 解析
@@ -127,11 +129,15 @@ def test_clean_chinese_site_no_params():
     assert p.page_url == "https://item.szlcsc.com/360864.html"
 
 
-def test_clean_chinese_site_no_params():
-    """国内站 ld+json 不含 additionalProperty（这是已知限制）。"""
+def test_chinese_site_footprint_from_html():
+    """国内站「商品封装」在 <dt>/<dd> 参数表里，解析后补进 additional_properties。"""
     from lcsc2inv.lcsc_client import load_fixture
-    from lcsc2inv.mapping import to_inventree_parameters
+
     p = load_fixture(FIXTURE_DIR / "CN_360864.html")
-    params = to_inventree_parameters(p, category_top=p.category_top, category_sub=p.category_sub)
-    # 类别是中文，不在 YAML 里，所以无参数映射
-    assert params == {}
+    assert p.get_property("封装") == "弯插"
+    assert p.package == "弯插"
+
+
+def test_international_site_package_property(capacitor):
+    """国际站 Package 参数直接暴露为 package 属性。"""
+    assert capacitor.package == "0805"

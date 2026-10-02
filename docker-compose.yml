@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  lcsc2inventree-web:
+    build: .
+    image: lcsc2inventree-web:latest
+    container_name: lcsc2inventree-web
+    restart: unless-stopped
+    ports:
+      - "8095:8080"
+    env_file:
+      - .env
+    environment:
+      LCSC_CONFIG_DIR: /opt/lcsc2inventree/config
+      LCSC_CACHE_DIR: /var/lib/lcsc2inventree/cache
+    volumes:
+      - lcsc-cache:/var/lib/lcsc2inventree/cache
+      # 一键备份依赖：宿主机 docker.sock（进入 InvenTree 容器执行原生备份）
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 备份产物「存进容器 /backup、暴露到宿主机 ./backup」
+      - ./backup:/backup
+      # HTTPS 证书（存在 nas.crt/nas.key 时 gunicorn 自动启用 TLS）
+      - ./certs:/certs:ro
+
+volumes:
+  lcsc-cache:

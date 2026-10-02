@@ -29,6 +29,9 @@ htmlcov/
 cache/
 .cache/
 
+# InvenTree 数据库备份产物（docker-compose 将 ./backup 映射到容器 /backup）
+backup/
+
 # IDE
 .idea/
 .vscode/
@@ -38,3 +41,12 @@ cache/
 # 系统
 .DS_Store
 Thumbs.db
+# HTTPS 证书（含私钥，不入库）
+certs/
+
+# 大体积镜像导出包（docker save 产物，不入库）
+lcsc2inventree-web.tar.gz
+
+# 工具工作区（ZCode 会话/录像等本地产物）
+.zcode/
+.video_agent/

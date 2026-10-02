@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# 环境与本地配置
+.env
+.env.local
+*.local.yaml
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 缓存（镜像内用挂载卷，不打进镜像）
+cache/
+.cache/
+.video_agent/
+
+# 测试 / 覆盖率 / IDE
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.zcode/
+.idea/
+.vscode/
+
+# 版本控制
+.git/
+.gitignore
+Dockerfile
+docker-compose.yml
+docs/
+examples/

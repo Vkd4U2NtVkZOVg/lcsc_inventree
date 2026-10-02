@@ -120,6 +120,18 @@ class LCSCPart(BaseModel):
         return None
 
     @property
+    def package(self) -> str | None:
+        """封装信息（如 0805、SOT-23、弯插）。
+
+        国际站 ld+json 的参数名是 `Package`；国内站解析出的参数名是 `封装`。
+        """
+        for name in ("Package", "封装", "Package Type", "Enclosure"):
+            value = self.get_property(name)
+            if value and value.strip():
+                return value.strip()
+        return None
+
+    @property
     def datasheet_url_resolved(self) -> str | None:
         """优先取 `subjectOf.url`，否则根据 productCode 拼出标准 datasheet URL。"""
         if self.datasheet_url:
