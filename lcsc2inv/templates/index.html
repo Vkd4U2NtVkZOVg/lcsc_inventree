@@ -56,6 +56,7 @@
   .status { font-size:13px; margin-top:10px; }
   .ok { color:var(--ok); } .err { color:var(--err); }
   table { border-collapse:collapse; width:100%; font-size:13px; margin-top:10px; }
+  .card { overflow-x:auto; }
   th, td { border:1px solid #e3e6ec; padding:7px 9px; text-align:left; }
   th { background:#f0f2f6; }
   .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:12px; }
@@ -1270,12 +1271,21 @@ function tbImgOptions(it){
 function renderTbRows(){
   var el = $("t-rows");
   if(!tbItems.length){ el.innerHTML = '<p class="dim">无数据</p>'; return; }
-  var html = '<table><tr><th>导入</th><th>IPN</th><th>名称（标题）</th><th>价格¥</th>' +
-    '<th>入库数</th><th>库存条码</th><th>规格（SKU）</th><th>主图</th><th>信息</th></tr>';
+  var html = '<div style="overflow-x:auto;">' +
+    '<table style="min-width:980px;"><tr>' +
+    '<th style="white-space:nowrap;">导入</th>' +
+    '<th style="white-space:nowrap;">IPN</th>' +
+    '<th style="white-space:nowrap;min-width:180px;">名称（标题）</th>' +
+    '<th style="white-space:nowrap;">价格¥</th>' +
+    '<th style="white-space:nowrap;">入库数</th>' +
+    '<th style="white-space:nowrap;">库存条码</th>' +
+    '<th style="white-space:nowrap;">规格（SKU）</th>' +
+    '<th style="white-space:nowrap;">主图</th>' +
+    '<th style="white-space:nowrap;">信息</th></tr>';
   tbItems.forEach(function(it, i){
     var skuSel;
     if((it.skus || []).length){
-      skuSel = '<select class="t-sku" data-i="' + i + '" style="max-width:170px;">';
+      skuSel = '<select class="t-sku" data-i="' + i + '" style="width:160px;">';
       it.skus.forEach(function(s){
         skuSel += '<option value="' + esc(s.text) + '"' +
           (s.text === (it.selected_sku || "") ? " selected" : "") + '>' +
@@ -1286,30 +1296,31 @@ function renderTbRows(){
       skuSel = '<span class="dim">单规格</span>';
     }
     var imgOpts = tbImgOptions(it);
-    var imgSel = '<select class="t-img" data-i="' + i + '" style="max-width:150px;">';
+    var imgSel = '<select class="t-img" data-i="' + i + '" style="width:140px;">';
     imgOpts.forEach(function(u, k){
       imgSel += '<option value="' + esc(u) + '"' +
         (u === (it.image_url || "") ? " selected" : "") + '>' +
         esc(k === 0 ? "主图（选中规格）" : tbShorten(u)) + '</option>';
     });
     imgSel += '</select>';
+    var shop = it.shop || "";
     var info = [];
-    if(it.shop) info.push('店铺 ' + esc(it.shop));
+    if(shop) info.push('店铺 ' + esc(shop.length > 12 ? shop.slice(0, 12) + "…" : shop));
     info.push('参数 ' + ((it.params || []).length));
     info.push(it.image_available ? '图✅' : '图⚠');
     html += '<tr>' +
-      '<td><input type="checkbox" class="t-row-check" data-i="' + i + '" checked></td>' +
-      '<td><input class="t-ipn mono" data-i="' + i + '" value="' + esc(it.ipn || "") + '" size="14"></td>' +
-      '<td><input class="t-name" data-i="' + i + '" value="' + esc(it.name || "") + '" size="38"></td>' +
-      '<td><input class="t-price mono" data-i="' + i + '" value="' + (it.price != null ? it.price : "") + '" size="6"></td>' +
-      '<td><input type="number" class="t-qty mono" data-i="' + i + '" min="0" placeholder="0" size="5" style="width:64px;"></td>' +
-      '<td><input class="t-barcode mono" data-i="' + i + '" size="12" placeholder="扫码/手输" title="填写并入库后绑定到该笔库存"></td>' +
+      '<td style="text-align:center;"><input type="checkbox" class="t-row-check" data-i="' + i + '" checked></td>' +
+      '<td><input class="t-ipn mono" data-i="' + i + '" value="' + esc(it.ipn || "") + '" style="width:132px;"></td>' +
+      '<td><input class="t-name" data-i="' + i + '" value="' + esc(it.name || "") + '" style="width:100%;min-width:170px;"></td>' +
+      '<td><input class="t-price mono" data-i="' + i + '" value="' + (it.price != null ? it.price : "") + '" style="width:70px;"></td>' +
+      '<td><input type="number" class="t-qty mono" data-i="' + i + '" min="0" placeholder="0" style="width:62px;"></td>' +
+      '<td><input class="t-barcode mono" data-i="' + i + '" placeholder="扫码/手输" title="填写并入库后绑定到该笔库存" style="width:126px;"></td>' +
       '<td>' + skuSel + '</td>' +
       '<td>' + imgSel + '</td>' +
-      '<td class="dim" style="font-size:12px;">' + info.join(' · ') + '</td>' +
+      '<td style="white-space:nowrap;font-size:12px;color:var(--dim);">' + info.join(' · ') + '</td>' +
       '</tr>';
   });
-  el.innerHTML = html + "</table>";
+  el.innerHTML = html + "</table></div>";
 }
 $("t-parse").onclick = async function(){
   var files = $("t-file").files;
