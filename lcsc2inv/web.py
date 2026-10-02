@@ -43,7 +43,7 @@ from pathlib import Path
 
 from urllib.parse import quote
 
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, jsonify, make_response, render_template, request, send_file
 from pydantic import ValidationError
 
 from lcsc2inv import barcode_lookup
@@ -406,8 +406,10 @@ def _job_to_payload(job: dict) -> dict:
 
 @app.route("/")
 def index() -> str:
-    """渲染单页界面。"""
-    return render_template("index.html")
+    """渲染单页界面（禁缓存，确保部署后立即生效）。"""
+    resp = make_response(render_template("index.html"))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
 
 
 @app.route("/api/import", methods=["POST"])

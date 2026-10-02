@@ -183,12 +183,13 @@
     <div class="card">
       <h2>更新现有 Part（LCSC / 淘宝）</h2>
       <p class="dim" style="margin:4px 0 0;">给已存在的 Part 按所选数据源更新字段。<b>不新建</b>、不动分类/厂商/库存（名称默认不动，可勾选更新）。Part ID 见 Part 详情页网址（<span class="mono">/part/&lt;ID&gt;/</span>）。</p>
+      <label style="font-weight:600;">数据源（二选一）</label>
+      <div class="row">
+        <label class="box"><input type="radio" name="u-source" value="lcsc" checked><b>LCSC 数据</b>（填代码/链接）</label>
+        <label class="box"><input type="radio" name="u-source" value="taobao"><b>淘宝 .mhtml 文件</b>（上传保存的网页）</label>
+      </div>
       <label>Part ID（InvenTree 内部编号，纯数字）</label>
       <input type="text" id="u-part" placeholder="如 1613">
-      <div class="row">
-        <label class="box"><input type="radio" name="u-source" value="lcsc" checked>LCSC 数据</label>
-        <label class="box"><input type="radio" name="u-source" value="taobao">淘宝 .mhtml 文件</label>
-      </div>
       <div id="u-lcsc-row">
         <label>LCSC 代码 / 链接</label>
         <div class="input-actions">
