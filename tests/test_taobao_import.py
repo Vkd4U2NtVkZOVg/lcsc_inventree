@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 from email import encoders
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
@@ -262,6 +263,58 @@ class TestTaobaoEndpoints:
         kwargs = writer.upsert_custom_part.call_args.kwargs
         assert kwargs["create_stock"] is False
         assert kwargs["quantity"] is None
+
+    def test_import_binds_stock_barcode(self, taobao_writer):
+        client, writer = taobao_writer
+        writer.upsert_custom_part.return_value = WriteResult(
+            part_pk=7, created={"part": True}, stock_item_pk=88,
+        )
+        token = self._upload(client).get_json()["items"][0]["token"]
+        with patch("lcsc2inv.web._inventree_request",
+                   return_value=(200, {})) as m_req:
+            rv = client.post("/api/taobao/import", json={
+                "rows": [{"token": token, "qty": "10",
+                          "stock_barcode": "TB-BARCODE-001"}],
+            })
+        assert rv.status_code == 200
+        d = rv.get_json()
+        out = d["results"][0]
+        assert out["stock_barcode_assigned"] is True
+        assert out["stock_barcode"] == "TB-BARCODE-001"
+        m_req.assert_called_once_with(
+            "POST", "/api/barcode/link/",
+            {"barcode": "TB-BARCODE-001", "stockitem": 88},
+        )
+
+    def test_import_barcode_binding_failure_reported(self, taobao_writer):
+        client, writer = taobao_writer
+        writer.upsert_custom_part.return_value = WriteResult(
+            part_pk=7, created={"part": True}, stock_item_pk=88,
+        )
+        token = self._upload(client).get_json()["items"][0]["token"]
+        with patch("lcsc2inv.web._inventree_request",
+                   return_value=(400, {"error": "Existing barcode found"})):
+            rv = client.post("/api/taobao/import", json={
+                "rows": [{"token": token, "qty": "10",
+                          "stock_barcode": "DUP"}],
+            })
+        out = rv.get_json()["results"][0]
+        assert out["stock_barcode_assigned"] is False
+        assert "Existing barcode found" in json.dumps(out["stock_barcode_error"])
+        # 条码失败不影响整行成功
+        assert out["ok"] is True
+
+    def test_import_barcode_without_stock_rejected(self, taobao_writer):
+        client, writer = taobao_writer
+        token = self._upload(client).get_json()["items"][0]["token"]
+        with patch("lcsc2inv.web._inventree_request") as m_req:
+            rv = client.post("/api/taobao/import", json={
+                "rows": [{"token": token, "stock_barcode": "X1"}],
+            })
+        out = rv.get_json()["results"][0]
+        assert out["stock_barcode_assigned"] is False
+        assert "未创建库存" in out["stock_barcode_error"]
+        m_req.assert_not_called()
 
     def test_import_skip_and_missing_token(self, taobao_writer):
         client, writer = taobao_writer

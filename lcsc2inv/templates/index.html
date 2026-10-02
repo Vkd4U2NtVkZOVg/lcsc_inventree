@@ -1271,7 +1271,7 @@ function renderTbRows(){
   var el = $("t-rows");
   if(!tbItems.length){ el.innerHTML = '<p class="dim">无数据</p>'; return; }
   var html = '<table><tr><th>导入</th><th>IPN</th><th>名称（标题）</th><th>价格¥</th>' +
-    '<th>入库数</th><th>规格（SKU）</th><th>主图</th><th>信息</th></tr>';
+    '<th>入库数</th><th>库存条码</th><th>规格（SKU）</th><th>主图</th><th>信息</th></tr>';
   tbItems.forEach(function(it, i){
     var skuSel;
     if((it.skus || []).length){
@@ -1303,6 +1303,7 @@ function renderTbRows(){
       '<td><input class="t-name" data-i="' + i + '" value="' + esc(it.name || "") + '" size="38"></td>' +
       '<td><input class="t-price mono" data-i="' + i + '" value="' + (it.price != null ? it.price : "") + '" size="6"></td>' +
       '<td><input type="number" class="t-qty mono" data-i="' + i + '" min="0" placeholder="0" size="5" style="width:64px;"></td>' +
+      '<td><input class="t-barcode mono" data-i="' + i + '" size="12" placeholder="扫码/手输" title="填写并入库后绑定到该笔库存"></td>' +
       '<td>' + skuSel + '</td>' +
       '<td>' + imgSel + '</td>' +
       '<td class="dim" style="font-size:12px;">' + info.join(' · ') + '</td>' +
@@ -1349,6 +1350,7 @@ $("t-run").onclick = async function(){
       name: document.querySelector('.t-name[data-i="' + i + '"]').value.trim(),
       price: document.querySelector('.t-price[data-i="' + i + '"]').value.trim() || null,
       qty: document.querySelector('.t-qty[data-i="' + i + '"]').value.trim() || null,
+      stock_barcode: document.querySelector('.t-barcode[data-i="' + i + '"]').value.trim() || null,
       sku_text: skuEl && skuEl.value ? skuEl.value : null,
       image_url: imgEl && imgEl.value ? imgEl.value : null,
       action: "create"
@@ -1373,6 +1375,10 @@ $("t-run").onclick = async function(){
         '<td>' + esc(typeof r.detail === "string" ? r.detail : JSON.stringify(r.detail)) +
         (r.error ? ' · <span class="err">' + esc(r.error) + '</span>' : '') +
         (r.image_skipped_reason ? ' · 图:' + esc(r.image_skipped_reason) : '') +
+        (r.stock_barcode ? ' · 条码:' + (r.stock_barcode_assigned ?
+          '✅ ' + esc(r.stock_barcode) :
+          '❌ ' + esc(typeof r.stock_barcode_error === "string"
+            ? r.stock_barcode_error : JSON.stringify(r.stock_barcode_error))) : '') +
         (r.part_url ? ' · <a href="' + esc(r.part_url) + '" target="_blank" rel="noopener">器件↗</a>' : '') +
         (r.stock_url ? ' · <a href="' + esc(r.stock_url) + '" target="_blank" rel="noopener">库存↗</a>' : '') +
         '</td></tr>';

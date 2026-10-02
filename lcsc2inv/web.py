@@ -989,6 +989,26 @@ def api_taobao_import():
             out["part_url"] = _part_url(result.part_pk) if result.part_pk else None
             out["stock_pk"] = result.stock_item_pk
             out["stock_url"] = _stock_url(result.stock_item_pk)
+
+            # 条码绑定（建了库存且填写了条码时；机制同 /api/import）
+            stock_barcode = (row.get("stock_barcode") or "").strip()
+            if stock_barcode and result.stock_item_pk:
+                out["stock_barcode"] = stock_barcode
+                try:
+                    status_code, barcode_result = _inventree_request(
+                        "POST",
+                        "/api/barcode/link/",
+                        {"barcode": stock_barcode, "stockitem": result.stock_item_pk},
+                    )
+                except requests.RequestException as exc:
+                    status_code, barcode_result = 502, str(exc)
+                out["stock_barcode_assigned"] = status_code < 400
+                if status_code >= 400:
+                    out["stock_barcode_error"] = barcode_result
+            elif stock_barcode:
+                out["stock_barcode"] = stock_barcode
+                out["stock_barcode_assigned"] = False
+                out["stock_barcode_error"] = "该行未创建库存（入库数为空），无法绑定条码"
             if result.errors:
                 out["error"] = "; ".join(result.errors)
             _record_history(
