@@ -831,7 +831,11 @@ class InvenTreeWriter:
         return {"part": part_pk, "template": tpl_pk, "value": value}
 
     def _list_part_parameters(self, part_pk: int) -> list[dict[str, Any]]:
-        """列出一个 Part 的全部参数，归一化为 [{pk, template, value}]。"""
+        """列出一个 Part 的全部参数，归一化为 [{pk, template, value}]。
+
+        `template` 尽量归一化为模板名：`template_detail` 存在时取 name，
+        否则保留模板 pk（调用方按「名字或 pk」混合键使用时注意一致性）。
+        """
         params: dict[str, Any] = {"limit": 500}
         if self._param_api_style() == "new":
             params.update({"model_type": "part", "model_id": part_pk})
@@ -840,12 +844,17 @@ class InvenTreeWriter:
         code, data = self._rest("GET", self._param_url("param"), params=params)
         if code != 200:
             raise RuntimeError(f"查询 Part 参数失败 HTTP {code}")
-        return [
-            {"pk": pp["pk"], "template": pp.get("template"),
-             "value": pp.get("data", pp.get("value") or "")}
-            for pp in self._rest_results(data)
-            if pp.get("template") is not None
-        ]
+        out: list[dict[str, Any]] = []
+        for pp in self._rest_results(data):
+            if pp.get("template") is None:
+                continue
+            tpl = pp.get("template_detail") or {}
+            out.append({
+                "pk": pp["pk"],
+                "template": tpl.get("name") or pp["template"],
+                "value": pp.get("data", pp.get("value") or ""),
+            })
+        return out
 
     def _find_template(self, name: str, *, strict: bool = False) -> int | None:
         """只读查询参数模板 pk。
