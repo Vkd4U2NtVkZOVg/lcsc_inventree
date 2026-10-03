@@ -760,3 +760,110 @@ class TestUpdateRefetchOnCnData:
         assert m_map.call_args.args[0] is intl_part
         assert "0402WGF2433TCE贴片电阻" in saved[0]["description"]
         assert "[参数: 243k]" in saved[0]["description"]
+
+
+class TestUpdateAntiDowngrade:
+    """首次更新遇 LCSC 限流：补抓重试 + 不用残缺参数覆盖描述。"""
+
+    def _writer_with_keywords_part(self):
+        from lcsc2inv.inventree_writer import InvenTreeWriter
+
+        w = InvenTreeWriter.__new__(InvenTreeWriter)
+        w.api = MagicMock()
+        w.settings = MagicMock()
+        w.supplier_name = "LCSC Electronics"
+        w._mfr_cache, w._supplier_cache = {}, {}
+        w._category_cache, w._template_cache = {}, {}
+        return w
+
+    def test_refetch_retries_then_succeeds(self):
+        from types import SimpleNamespace as NS
+
+        from lcsc2inv.lcsc_client import LcscFetchError
+        from lcsc2inv.lcsc_models import PropertyValue
+
+        w = self._writer_with_keywords_part()
+        cn_part = LCSCPart(
+            sku="CN:44240",
+            additional_properties=[PropertyValue(name="封装", value="0402")],
+        )
+        intl_part = LCSCPart(
+            sku="C43249",
+            additional_properties=[
+                PropertyValue(name="Resistance", value="243kΩ"),
+                PropertyValue(name="Tolerance", value="±1%"),
+            ],
+        )
+        saved: list[dict] = []
+
+        class FakePart:
+            def __init__(self, api, pk):
+                self.pk = pk
+                self.keywords = "C43249,MPN,品牌"
+                self.description = "旧描述 [参数: 243k | ±1%]"
+            def save(self, payload):
+                saved.append(payload)
+
+        fetcher = MagicMock()
+        # 前两次限流，第三次成功
+        fetcher.fetch.side_effect = [
+            LcscFetchError("被限流 HTTP 403"),
+            LcscFetchError("被限流 HTTP 403"),
+            intl_part,
+        ]
+
+        with patch("lcsc2inv.inventree_writer.Part", FakePart), \
+             patch("lcsc2inv.inventree_writer.categorizer_match",
+                   return_value=NS(category_path="Passive/Resistors/X")), \
+             patch("lcsc2inv.inventree_writer.to_inventree_parameters",
+                   return_value={"Value": {"value": "243k", "raw": "243kΩ"}}), \
+             patch("lcsc2inv.inventree_writer.time.sleep"), \
+             patch("lcsc2inv.inventree_writer.default_fetcher",
+                   return_value=fetcher):
+            w.update_part_fields(
+                cn_part, part_pk=1, update_description=True, update_image=False,
+            )
+        assert fetcher.fetch.call_count == 3  # 重试后成功
+        # 成功拿到完整参数 → 描述正常更新
+        assert "[参数: 243k]" in saved[0]["description"]
+
+    def test_no_downgrade_when_refetch_fails(self):
+        """补抓始终失败 → 保留原描述（参数段更丰富），不用残缺数据覆盖。"""
+        from types import SimpleNamespace as NS
+
+        from lcsc2inv.lcsc_client import LcscFetchError
+        from lcsc2inv.lcsc_models import PropertyValue
+
+        w = self._writer_with_keywords_part()
+        cn_part = LCSCPart(
+            sku="CN:44240",
+            additional_properties=[PropertyValue(name="封装", value="0402")],
+        )
+        saved: list[dict] = []
+
+        class FakePart:
+            def __init__(self, api, pk):
+                self.pk = pk
+                self.keywords = "C43249,MPN,品牌"
+                # 现有描述参数段有 2 个值
+                self.description = "旧描述 [参数: 243k | ±1%]"
+            def save(self, payload):
+                saved.append(payload)
+
+        fetcher = MagicMock()
+        fetcher.fetch.side_effect = LcscFetchError("被限流 HTTP 403")
+
+        with patch("lcsc2inv.inventree_writer.Part", FakePart), \
+             patch("lcsc2inv.inventree_writer.categorizer_match",
+                   return_value=NS(category_path="__uncategorized__")), \
+             patch("lcsc2inv.inventree_writer.to_inventree_parameters",
+                   return_value={}), \
+             patch("lcsc2inv.inventree_writer.time.sleep"), \
+             patch("lcsc2inv.inventree_writer.default_fetcher",
+                   return_value=fetcher):
+            w.update_part_fields(
+                cn_part, part_pk=1, update_description=True, update_image=False,
+            )
+        # 描述未被降级覆盖
+        assert saved == [] or "description" not in saved[0]
+        assert fetcher.fetch.call_count == 3  # 重试了 3 次

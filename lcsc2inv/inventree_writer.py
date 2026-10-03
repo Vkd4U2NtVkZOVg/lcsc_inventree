@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -657,21 +658,31 @@ class InvenTreeWriter:
         # 一条「封装」）：若现有 Part 的 keywords 首段是 C-code，则按该编号
         # 从国际站补抓**更全的参数**用于参数/描述参数段——描述正文仍用本次
         # 抓取的数据源（用户选了什么源就显示什么源的内容）。
+        # LCSC 对数据中心 IP 偶发 403 限流（首次更新最常见），多试几次。
         richer: LCSCPart | None = None
+        refetch_failed = False
         if len(part.additional_properties) <= 1:
             kw_first = (getattr(obj, "keywords", None) or "").split(",")[0].strip()
             if re.fullmatch(r"C\d+", kw_first):
-                try:
-                    f = fetcher or default_fetcher(self.settings)
-                    candidate = f.fetch(kw_first)
-                    if len(candidate.additional_properties) > len(part.additional_properties):
-                        richer = candidate
-                        logger.info(
-                            "国内站数据缺参数，按 %s 从国际站补抓参数（part_pk=%s）",
-                            kw_first, part_pk,
+                f = fetcher or default_fetcher(self.settings)
+                for attempt in range(1, 4):
+                    try:
+                        candidate = f.fetch(kw_first)
+                        if len(candidate.additional_properties) > len(part.additional_properties):
+                            richer = candidate
+                            logger.info(
+                                "国内站数据缺参数，按 %s 从国际站补抓参数（part_pk=%s）",
+                                kw_first, part_pk,
+                            )
+                        refetch_failed = False
+                        break
+                    except LcscFetchError as exc:
+                        refetch_failed = True
+                        logger.warning(
+                            "按 %s 补抓国际站参数失败（第 %s/3 次）: %s",
+                            kw_first, attempt, exc,
                         )
-                except LcscFetchError as exc:
-                    logger.warning("按 %s 补抓国际站参数失败: %s", kw_first, exc)
+                        time.sleep(attempt)  # 1s/2s/3s 退避
 
         package = self._resolve_package(part, footprint)
 
@@ -694,10 +705,23 @@ class InvenTreeWriter:
             # 与创建时一致的命名逻辑：LCSC 名称 → MPN → SKU
             payload["name"] = part.name or part.mpn or part.sku
         if update_description:
-            payload["description"] = self._with_params_suffix(
+            new_desc = self._with_params_suffix(
                 self._with_package_suffix(part.description or "", package),
                 self._mapped_values(mapped),
             )[:250]
+            # 防降级：补抓失败（如 LCSC 限流）时，若现有描述的参数段比
+            # 本次数据源更丰富，保留原描述——绝不用残缺参数覆盖
+            m = re.search(r"\[参数[：:]([^\]]*)\]",
+                          getattr(obj, "description", None) or "")
+            old_cnt = len([v for v in m.group(1).split("|") if v.strip()]) if m else 0
+            new_cnt = len(self._mapped_values(mapped) or {})
+            if refetch_failed and old_cnt > new_cnt:
+                logger.info(
+                    "补抓失败且现有描述参数更全（%d > %d），保留原描述 pk=%s",
+                    old_cnt, new_cnt, part_pk,
+                )
+            else:
+                payload["description"] = new_desc
         if update_keywords:
             payload["keywords"] = self._build_keywords(part, package=package)
         if update_notes:
