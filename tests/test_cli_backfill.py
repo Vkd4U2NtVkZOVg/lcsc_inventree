@@ -133,11 +133,11 @@ class TestBackfillPackage:
         assert result.exit_code == 0, result.output
 
         saved = dict(FakePart.saved)
-        # C111111：描述加后缀 + keywords 追加封装
-        assert saved[1]["description"] == "10k 1% resistor（封装：0603）"
+        # C111111：描述加后缀（封装 + 参数值）+ keywords 追加封装
+        assert saved[1]["description"] == "10k 1% resistor（封装：0603） [参数: 0603]"
         assert saved[1]["keywords"] == "C111111,0603"
-        # C28323：描述/keywords 已含封装 → 无字段保存，仅参数
-        assert 2 not in saved
+        # C28323：描述新增参数后缀（Base 链路 mapped 值）
+        assert saved[2]["description"] == "1uF cap 0805 [参数: ±10% | 50V | 0805]"
         # Package 参数两者都写
         assert (1, "Package", "0603") in env.param_calls
         assert (2, "Package", "0805") in env.param_calls
@@ -164,7 +164,8 @@ class TestBackfillPackage:
     def test_up_to_date_no_writes(self, env):
         """描述/keywords/参数全部已就绪 → 计入「已是最新」，零写入。"""
         FakePart.rows = [
-            _inv_part(1, "C111111", description="res（封装：0603）",
+            _inv_part(1, "C111111",
+                      description="res（封装：0603） [参数: 0603]",
                       keywords="C111111,0603"),
         ]
         env.parts_by_code["C111111"] = _c_part("C111111", "0603", "res")
@@ -184,7 +185,8 @@ class TestBackfillPackage:
             _inv_part(3, "CN:360864", description="RJ45 弯插连接器",
                       keywords="C386757,弯插"),
             # 描述不含封装 → 追加后缀 + keywords
-            _inv_part(4, "CN:999999", description="RJ45 连接器", keywords="C1"),
+            _inv_part(4, "CN:999999",
+                      description="RJ45 连接器 [参数: 弯插]", keywords="C1"),
         ]
         env.parts_by_code["CN:360864"] = load_fixture(FIXTURE_DIR + "/CN_360864.html")
         env.parts_by_code["CN:999999"] = load_fixture(FIXTURE_DIR + "/CN_360864.html")
@@ -192,8 +194,9 @@ class TestBackfillPackage:
         result = CliRunner(env={"COLUMNS": "300"}).invoke(cli_group, ["backfill-package", "--commit"])
         assert result.exit_code == 0, result.output
         saved = dict(FakePart.saved)
-        assert 3 not in saved  # 描述/keywords 已含封装
-        assert saved[4]["description"] == "RJ45 连接器（封装：弯插）"
+        assert saved[3]["description"] == "RJ45 弯插连接器 [参数: 弯插]"
+        # 描述预置了参数段已收敛 → 仅 keywords 变更
+        assert saved[4] == {"keywords": "C1,弯插"}
         assert saved[4]["keywords"] == "C1,弯插"
         assert (3, "Package", "弯插") in env.param_calls
         assert (4, "Package", "弯插") in env.param_calls

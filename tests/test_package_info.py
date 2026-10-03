@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -142,7 +143,10 @@ class TestUpdatePartFieldsPackage:
             def save(self, payload):
                 saved.append(payload)
 
-        with patch("lcsc2inv.inventree_writer.Part", FakePart):
+        with patch("lcsc2inv.inventree_writer.Part", FakePart), \
+             patch("lcsc2inv.inventree_writer.categorizer_match",
+                   return_value=SimpleNamespace(
+                       category_path="__uncategorized__")):
             w.update_part_fields(
                 part, part_pk=1, update_description=True,
                 update_image=False, update_keywords=True,
@@ -153,7 +157,8 @@ class TestUpdatePartFieldsPackage:
 
     def test_suffix_from_lcsc_data(self):
         payload = self._run(_part(package="弯插", description="RJ45 连接器"))
-        assert payload["description"] == "RJ45 连接器（封装：弯插）"
+        # 参数值并入描述（Package=弯插 来自 uncategorized 的 Base 链路）
+        assert payload["description"] == "RJ45 连接器（封装：弯插） [参数: 弯插]"
 
     def test_suffix_from_explicit_footprint(self):
         payload = self._run(_part(description="RJ45 连接器"), footprint="0805")
@@ -349,3 +354,55 @@ def test_write_options_footprint_default():
 def test_write_result_unchanged_shape():
     r = WriteResult(part_pk=1)
     assert r.ok() is True
+
+
+# ---------------------------------------------------------------------------
+# 描述并入参数值（InvenTree 全局搜索不索引参数）
+# ---------------------------------------------------------------------------
+
+
+class TestParamsSuffix:
+    def test_appended_values_only(self):
+        out = InvenTreeWriter._with_params_suffix(
+            "10k 1% resistor（封装：0603）",
+            {"Value": "10k", "Tolerance": "±1%", "Package": "0603"},
+        )
+        assert out == "10k 1% resistor（封装：0603） [参数: 10k | ±1% | 0603]"
+
+    def test_replaces_existing_segment(self):
+        out = InvenTreeWriter._with_params_suffix(
+            "old desc [参数: 旧值]",
+            {"Value": "30k"},
+        )
+        assert out == "old desc [参数: 30k]"
+
+    def test_no_params_unchanged(self):
+        assert InvenTreeWriter._with_params_suffix("abc", None) == "abc"
+        assert InvenTreeWriter._with_params_suffix("abc", {"Value": "  "}) == "abc"
+
+    def test_long_base_drops_tail_values(self):
+        base = "x" * 240
+        out = InvenTreeWriter._with_params_suffix(
+            base, {"Value": "10k", "Tolerance": "±1%"}
+        )
+        assert out.startswith(base)
+        assert "Tolerance" not in out  # 放不下的值被丢弃
+        assert len(out) <= 250
+
+    def test_ensure_part_with_mapped(self):
+        w = _writer()
+        created = MagicMock()
+        created.pk = 42
+        part = _part(description="10k 1% resistor")
+        with patch.object(w, "_find_part_by_ipn", return_value=None), \
+             patch("lcsc2inv.inventree_writer.Part") as PartMock:
+            PartMock.create.return_value = created
+            w._ensure_part(
+                part, category_pk=7, update=False, dry_run=False,
+                package="0603",
+                mapped={"Value": {"value": "10k", "raw": "10kΩ"},
+                        "Package": {"value": "0603", "raw": "0603"}},
+            )
+        payload = PartMock.create.call_args.args[1]
+        assert "10k" in payload["description"]
+        assert "[参数: 10k | 0603]" in payload["description"]

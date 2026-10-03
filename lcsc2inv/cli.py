@@ -437,23 +437,8 @@ def backfill_package(
             console.print(f"[dim][{i}/{total}] {code}: LCSC 无封装数据，跳过[/dim]")
             continue
 
-        # 2. 基于 InvenTree 现有值计算变更（不覆盖手工修改）
-        new_desc = InvenTreeWriter._with_package_suffix(t["description"], package)[:250]
-        # keywords：封装值可能自带逗号（如 Through Hole,P=3.4mm），
-        # 用整体子串判断避免重复追加，并顺带清洗历史重复
-        kws = InvenTreeWriter._clean_keywords(t["keywords"])
-        if package.lower() not in (t["keywords"] or "").lower():
-            kws.append(package)
-        new_kw = ",".join(kws)
-
-        payload: dict[str, Any] = {}
-        if new_desc != t["description"]:
-            payload["description"] = new_desc
-        if new_kw != t["keywords"]:
-            payload["keywords"] = new_kw
-
-        # 3. 分类映射参数（Value/Tolerance/Rated Voltage…，SDK 门禁期缺失的那批）
-        #    走与导入一致的映射链路；Package 单独处理避免重复写
+        # 2. 分类映射参数（Value/Tolerance/Rated Voltage…，SDK 门禁期缺失的那批）
+        #    走与导入一致的映射链路；Package 用 raw 值（与描述后缀一致）
         cat_match = categorizer_match(part)
         mapped = to_inventree_parameters(
             part,
@@ -468,6 +453,26 @@ def backfill_package(
         mapped = {k: v["value"] for k, v in mapped.items() if v.get("value")}
         if package:
             mapped["Package"] = package
+
+        # 3. 基于 InvenTree 现有值计算变更（不覆盖手工修改）
+        #    描述并入参数值（InvenTree 全局搜索不索引 PartParameter）
+        new_desc = InvenTreeWriter._with_params_suffix(
+            InvenTreeWriter._with_package_suffix(t["description"], package),
+            mapped,
+        )[:250]
+        # keywords：封装值可能自带逗号（如 Through Hole,P=3.4mm），
+        # 用整体子串判断避免重复追加，并顺带清洗历史重复
+        kws = InvenTreeWriter._clean_keywords(t["keywords"])
+        if package.lower() not in (t["keywords"] or "").lower():
+            kws.append(package)
+        new_kw = ",".join(kws)
+
+        payload: dict[str, Any] = {}
+        if new_desc != t["description"]:
+            payload["description"] = new_desc
+        if new_kw != t["keywords"]:
+            payload["keywords"] = new_kw
+
         # 参数现状（只读查询；dry-run 也查，保证预览真实）
         try:
             existing_params = {

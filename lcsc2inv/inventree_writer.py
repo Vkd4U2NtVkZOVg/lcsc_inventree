@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -148,6 +149,21 @@ class InvenTreeWriter:
             if cat_pk is None and cat_match.category_path != "__uncategorized__":
                 result.errors.append(f"无法创建类别 {cat_match.category_path}")
 
+            # 分类映射参数只算一次：写 PartParameter + 描述后缀共用
+            mapped = to_inventree_parameters(
+                part,
+                category_top=(cat_match.category_path.split("/")[0]
+                              if cat_match.category_path
+                              and not cat_match.category_path.startswith("__")
+                              else None),
+                category_sub=(
+                    cat_match.category_path.split("/", 2)[1]
+                    if cat_match.category_path and "/" in cat_match.category_path
+                    and not cat_match.category_path.startswith("__")
+                    else None
+                ),
+            )
+
             mfr_pk = self._ensure_manufacturer(part.manufacturer_name, dry_run=opts.dry_run)
             result.manufacturer_pk = mfr_pk
 
@@ -161,6 +177,7 @@ class InvenTreeWriter:
                 update=opts.update_existing,
                 dry_run=opts.dry_run,
                 package=self._resolve_package(part, opts.footprint),
+                mapped=mapped,
             )
             result.part_pk = part_pk
             result.created["part"] = created
@@ -188,6 +205,7 @@ class InvenTreeWriter:
                     else None
                 ),
                 part_pk=part_pk,
+                mapped=mapped,
             )
 
             # 6. ManufacturerPart
@@ -365,8 +383,13 @@ class InvenTreeWriter:
         update: bool,
         dry_run: bool,
         package: str | None = None,
+        mapped: dict[str, dict[str, str]] | None = None,
     ) -> tuple[int | None, bool]:
-        """创建或更新 Part；返回 (pk, created)。"""
+        """创建或更新 Part；返回 (pk, created)。
+
+        `mapped`：分类映射参数（to_inventree_parameters 结果）——其**值**
+        会以 `[参数: v1 | v2 | …]` 形式并入描述，保证全局搜索可命中。
+        """
         notes = to_part_notes(part)  # 仅 dry-run 用
         if dry_run:
             logger.info("[DRY] part upsert sku=%s name=%s mpn=%s",
@@ -377,8 +400,9 @@ class InvenTreeWriter:
         existing_pk = self._find_part_by_ipn(part.sku)
         payload: dict[str, Any] = {
             "name": part.name or part.mpn or part.sku,
-            "description": self._with_package_suffix(
-                part.description or "", package
+            "description": self._with_params_suffix(
+                self._with_package_suffix(part.description or "", package),
+                self._mapped_values(mapped),
             )[:250],
             "IPN": part.sku,
             "keywords": self._build_keywords(part, package=package),
@@ -497,6 +521,40 @@ class InvenTreeWriter:
                 return str(cand).strip()
         return None
 
+    # InvenTree 全局搜索不索引 PartParameter，只搜名称/IPN/描述/关键词——
+    # 把映射参数的值并入描述以保证可搜索。已有段用该正则定位替换（幂等）。
+    _PARAMS_SUFFIX_RE = re.compile(r"\s*\[参数[：:][^\]]*\]\s*$")
+
+    @classmethod
+    def _mapped_values(cls, mapped: dict[str, dict[str, str]] | None) -> dict[str, str]:
+        """从 to_inventree_parameters 结果提取 {模板名: 清洗后的值}。"""
+        if not mapped:
+            return {}
+        return {
+            str(k): str(v["value"]).strip()
+            for k, v in mapped.items() if v.get("value")
+        }
+
+    @classmethod
+    def _with_params_suffix(
+        cls, description: str, params: dict[str, str] | None
+    ) -> str:
+        """把映射参数的**值**并入描述尾部：`… [参数: 10k | ±1% | 0602]`。
+
+        - 幂等：已有 `[参数: …]` 段整体替换为新值；
+        - 描述总长超 250 时从尾部丢弃参数值直到放得下（放不下就不加）。
+        """
+        base = cls._PARAMS_SUFFIX_RE.sub("", description or "").rstrip()
+        values = [str(v).strip() for v in (params or {}).values() if str(v).strip()]
+        if not values:
+            return base
+        budget = 250 - len(base) - 4  # " [参数: " 前后按最小 4 字符余量估计
+        while values and budget < len(" | ".join(values)):
+            values.pop()
+        if not values:
+            return base
+        return f"{base} [参数: {' | '.join(values)}]"[:250]
+
     @staticmethod
     def _clean_keywords(raw: str) -> list[str]:
         """keywords 去重清洗：去空白、大小写不敏感去重、保序。
@@ -596,14 +654,26 @@ class InvenTreeWriter:
         }
         package = self._resolve_package(part, footprint)
 
+        # 分类映射参数只算一次：描述后缀 + 参数写入共用
+        mapped: dict[str, dict[str, str]] | None = None
+        try:
+            match = categorizer_match(part, create_missing_category=False)
+            path = match.category_path or ""
+            top = path.split("/")[0] if path and not path.startswith("__") else None
+            sub = path.split("/", 2)[1] if path and "/" in path else None
+            mapped = to_inventree_parameters(part, category_top=top, category_sub=sub)
+        except Exception:  # noqa: BLE001 — 映射失败不影响其它字段
+            mapped = None
+
         # 1) 简单文本字段（一次 save）
         payload: dict[str, Any] = {}
         if update_name:
             # 与创建时一致的命名逻辑：LCSC 名称 → MPN → SKU
             payload["name"] = part.name or part.mpn or part.sku
         if update_description:
-            payload["description"] = self._with_package_suffix(
-                part.description or "", package
+            payload["description"] = self._with_params_suffix(
+                self._with_package_suffix(part.description or "", package),
+                self._mapped_values(mapped),
             )[:250]
         if update_keywords:
             payload["keywords"] = self._build_keywords(part, package=package)
@@ -636,12 +706,9 @@ class InvenTreeWriter:
         # 3) 参数（按 LCSC 分类映射模板；只写不删）
         if update_parameters:
             try:
-                match = categorizer_match(part, create_missing_category=False)
-                path = match.category_path or ""
-                top = path.split("/")[0] if path and not path.startswith("__") else None
-                sub = path.split("/", 2)[1] if path and "/" in path else None
                 self._write_parameters(
-                    part, category_top=top, category_sub=sub, part_pk=part_pk
+                    part, category_top=None, category_sub=None,
+                    part_pk=part_pk, mapped=mapped,
                 )
                 out["parameters"] = {"written": True}
             except Exception as exc:  # noqa: BLE001 — 参数失败不影响其它字段
@@ -925,10 +992,13 @@ class InvenTreeWriter:
         category_top: str | None,
         category_sub: str | None,
         part_pk: int,
+        mapped: dict[str, dict[str, str]] | None = None,
     ) -> None:
-        params = to_inventree_parameters(
-            part, category_top=category_top, category_sub=category_sub
-        )
+        if mapped is None:
+            mapped = to_inventree_parameters(
+                part, category_top=category_top, category_sub=category_sub
+            )
+        params = self._mapped_values(mapped)
         if not params:
             return
         # {模板名: (parameter_pk, value)} —— _list_part_parameters 的
@@ -939,9 +1009,9 @@ class InvenTreeWriter:
         }
         url = self._param_url("param")
         value_field = "data" if self._param_api_style() == "new" else "value"
-        for inv_name, body in params.items():
+        for inv_name, value in params.items():
             inv_name = self._clean_param_name(inv_name)
-            value = self._clean_param_value(body["value"])
+            value = self._clean_param_value(value)
             if not inv_name or not value:
                 continue
             tpl_pk = self._ensure_template(inv_name)
