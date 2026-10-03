@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from lcsc2inv.inventree_writer import WriteResult
+from lcsc2inv.lcsc_models import LCSCPart
 from lcsc2inv.taobao_import import parse_mhtml, _image_ext
 from lcsc2inv.web import app
 
@@ -698,3 +699,54 @@ class TestUpsertCustomPartDescSuffix:
         assert r.ok() is True
         payload = PartMock.create.call_args.args[1]
         assert payload["description"] == "降噪硅麦 [参数: XF | 3729]"
+
+
+class TestUpdateRefetchOnCnData:
+    def test_cn_page_data_refetches_intl_via_keywords(self):
+        """更新时抓到无参数的国内站数据 → 按 keywords 首段 C-code 补抓国际站。"""
+        from types import SimpleNamespace as NS
+
+        from lcsc2inv.inventree_writer import InvenTreeWriter
+        from lcsc2inv.lcsc_models import PropertyValue
+
+        w = InvenTreeWriter.__new__(InvenTreeWriter)
+        w.api = MagicMock()
+        w.settings = MagicMock()
+        w.supplier_name = "LCSC Electronics"
+        w._mfr_cache, w._supplier_cache = {}, {}
+        w._category_cache, w._template_cache = {}, {}
+
+        cn_part = LCSCPart(sku="CN:44240")  # 国内站：无参数，仅封装由 dt/dd 补
+        intl_part = LCSCPart(
+            sku="C43249",
+            additional_properties=[PropertyValue(name="Resistance", value="243kΩ")],
+        )
+        saved: list[dict] = []
+
+        class FakePart:
+            def __init__(self, api, pk):
+                self.pk = pk
+                self.keywords = "C43249,0402WGF2433TCE,UNI-ROYAL"
+            def save(self, payload):
+                saved.append(payload)
+
+        fetcher = MagicMock()
+        fetcher.fetch.return_value = intl_part
+
+        with patch("lcsc2inv.inventree_writer.Part", FakePart), \
+             patch("lcsc2inv.inventree_writer.categorizer_match",
+                   return_value=NS(category_path="Passive/Resistors/X")), \
+             patch("lcsc2inv.inventree_writer.to_inventree_parameters",
+                   return_value={"Value": {"value": "243k", "raw": "243kΩ"}}), \
+             patch("lcsc2inv.inventree_writer.default_fetcher",
+                   return_value=fetcher) as m_df:
+            w.update_part_fields(
+                cn_part, part_pk=1462, update_description=True,
+                update_image=False, update_keywords=False,
+                fetcher=None,  # 无 fetcher → 应自动建一个补抓
+            )
+        # 用 keywords 首段 C43249 补抓
+        fetcher.fetch.assert_called_once_with("C43249")
+        assert m_df.called
+        # 描述参数段来自国际站数据（不再降级）
+        assert "[参数: 243k]" in saved[0]["description"]

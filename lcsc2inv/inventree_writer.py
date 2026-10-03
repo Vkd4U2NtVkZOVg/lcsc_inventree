@@ -652,6 +652,25 @@ class InvenTreeWriter:
             "parameters": None,
             "errors": [],
         }
+
+        # 国内站页面（szlcsc）的 ld+json 不带参数表：若本次抓到的数据
+        # 没有任何参数、而现有 Part 的 keywords 首段是 C-code，则改用该
+        # 编号从国际站补抓完整参数，避免描述/参数被降级覆盖
+        if not part.additional_properties:
+            kw_first = (getattr(obj, "keywords", None) or "").split(",")[0].strip()
+            if re.fullmatch(r"C\d+", kw_first):
+                try:
+                    f = fetcher or default_fetcher(self.settings)
+                    richer = f.fetch(kw_first)
+                    if richer.additional_properties:
+                        logger.info(
+                            "国内站数据无参数，改用 %s 从国际站补抓（part_pk=%s）",
+                            kw_first, part_pk,
+                        )
+                        part = richer
+                except LcscFetchError as exc:
+                    logger.warning("按 %s 补抓国际站参数失败: %s", kw_first, exc)
+
         package = self._resolve_package(part, footprint)
 
         # 分类映射参数只算一次：描述后缀 + 参数写入共用
