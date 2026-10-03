@@ -1171,6 +1171,17 @@ class TestPartUpdate:
         assert kwargs["update_notes"] is False
         assert kwargs["update_parameters"] is False
 
+    def test_parameters_default_true(self, client, import_patches):
+        """未勾选/未传 parameters 字段时，默认也写入参数。"""
+        _fetcher, _api, writer = import_patches
+        writer.update_part_fields.return_value = {
+            "updated_fields": ["description"], "image": None,
+            "parameters": {"written": True}, "errors": [],
+        }
+        rv = client.post("/api/part/update", json={"part_pk": 1, "code": "C28323"})
+        assert rv.status_code == 200
+        assert writer.update_part_fields.call_args.kwargs["update_parameters"] is True
+
     def test_missing_fields_400(self, client):
         rv = client.post("/api/part/update", json={})
         assert rv.status_code == 400

@@ -594,7 +594,7 @@ def api_part_update():
         image: bool         强制重传图片（默认 true）
         keywords: bool      更新关键词（默认 true）
         notes: bool         更新备注+LCSC 链接（默认 false）
-        parameters: bool    写入分类映射参数（默认 false）
+        parameters: bool    写入分类映射参数（默认 true）
 
     multipart 表单字段（淘宝源）：
         part_pk: 数字       必填
@@ -643,7 +643,7 @@ def api_part_update():
                 update_image=bool(data.get("image", True)),
                 update_keywords=bool(data.get("keywords", True)),
                 update_notes=bool(data.get("notes", False)),
-                update_parameters=bool(data.get("parameters", False)),
+                update_parameters=bool(data.get("parameters", True)),
                 fetcher=fetcher,
             )
         except ValueError as exc:

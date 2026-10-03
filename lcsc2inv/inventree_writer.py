@@ -615,7 +615,7 @@ class InvenTreeWriter:
         update_image: bool = True,
         update_keywords: bool = True,
         update_notes: bool = False,
-        update_parameters: bool = False,
+        update_parameters: bool = True,
         footprint: str | None = None,
         fetcher: Fetcher | None = None,
     ) -> dict:
