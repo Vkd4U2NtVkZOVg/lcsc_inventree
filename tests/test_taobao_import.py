@@ -716,11 +716,18 @@ class TestUpdateRefetchOnCnData:
         w._mfr_cache, w._supplier_cache = {}, {}
         w._category_cache, w._template_cache = {}, {}
 
-        cn_part = LCSCPart(sku="CN:44240")  # 国内站：无参数，仅封装由 dt/dd 补
+        cn_part = LCSCPart(
+            sku="CN:44240",
+            description="0402WGF2433TCE贴片电阻，价格￥0.0051元。",
+            additional_properties=[PropertyValue(name="封装", value="0402")],
+        )  # 国内站：ld+json 无参数表，仅解析器注入的封装一条
         intl_part = LCSCPart(
             sku="C43249",
-            additional_properties=[PropertyValue(name="Resistance", value="243kΩ")],
-        )
+            additional_properties=[
+                PropertyValue(name="Resistance", value="243kΩ"),
+                PropertyValue(name="Tolerance", value="±1%"),
+            ],
+        )  # 国际站参数更全（2 条 > 国内站 1 条）才会被采用
         saved: list[dict] = []
 
         class FakePart:
@@ -735,9 +742,9 @@ class TestUpdateRefetchOnCnData:
 
         with patch("lcsc2inv.inventree_writer.Part", FakePart), \
              patch("lcsc2inv.inventree_writer.categorizer_match",
-                   return_value=NS(category_path="Passive/Resistors/X")), \
+                   return_value=NS(category_path="Passive/Resistors/X")) as m_cat, \
              patch("lcsc2inv.inventree_writer.to_inventree_parameters",
-                   return_value={"Value": {"value": "243k", "raw": "243kΩ"}}), \
+                   return_value={"Value": {"value": "243k", "raw": "243kΩ"}}) as m_map, \
              patch("lcsc2inv.inventree_writer.default_fetcher",
                    return_value=fetcher) as m_df:
             w.update_part_fields(
@@ -745,8 +752,11 @@ class TestUpdateRefetchOnCnData:
                 update_image=False, update_keywords=False,
                 fetcher=None,  # 无 fetcher → 应自动建一个补抓
             )
-        # 用 keywords 首段 C43249 补抓
+        # 用 keywords 首段 C43249 补抓（CN 数据只有 1 条注入的封装属性）
         fetcher.fetch.assert_called_once_with("C43249")
         assert m_df.called
-        # 描述参数段来自国际站数据（不再降级）
+        # 参数映射用补抓结果；描述正文保留本次数据源的内容
+        assert m_cat.call_args.args[0] is intl_part
+        assert m_map.call_args.args[0] is intl_part
+        assert "0402WGF2433TCE贴片电阻" in saved[0]["description"]
         assert "[参数: 243k]" in saved[0]["description"]

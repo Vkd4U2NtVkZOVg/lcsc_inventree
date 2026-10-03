@@ -653,34 +653,38 @@ class InvenTreeWriter:
             "errors": [],
         }
 
-        # 国内站页面（szlcsc）的 ld+json 不带参数表：若本次抓到的数据
-        # 没有任何参数、而现有 Part 的 keywords 首段是 C-code，则改用该
-        # 编号从国际站补抓完整参数，避免描述/参数被降级覆盖
-        if not part.additional_properties:
+        # 国内站页面（szlcsc）的 ld+json 不带参数表（最多只有解析器注入的
+        # 一条「封装」）：若现有 Part 的 keywords 首段是 C-code，则按该编号
+        # 从国际站补抓**更全的参数**用于参数/描述参数段——描述正文仍用本次
+        # 抓取的数据源（用户选了什么源就显示什么源的内容）。
+        richer: LCSCPart | None = None
+        if len(part.additional_properties) <= 1:
             kw_first = (getattr(obj, "keywords", None) or "").split(",")[0].strip()
             if re.fullmatch(r"C\d+", kw_first):
                 try:
                     f = fetcher or default_fetcher(self.settings)
-                    richer = f.fetch(kw_first)
-                    if richer.additional_properties:
+                    candidate = f.fetch(kw_first)
+                    if len(candidate.additional_properties) > len(part.additional_properties):
+                        richer = candidate
                         logger.info(
-                            "国内站数据无参数，改用 %s 从国际站补抓（part_pk=%s）",
+                            "国内站数据缺参数，按 %s 从国际站补抓参数（part_pk=%s）",
                             kw_first, part_pk,
                         )
-                        part = richer
                 except LcscFetchError as exc:
                     logger.warning("按 %s 补抓国际站参数失败: %s", kw_first, exc)
 
         package = self._resolve_package(part, footprint)
 
         # 分类映射参数只算一次：描述后缀 + 参数写入共用
+        # （数据源优先用参数更全的补抓结果）
         mapped: dict[str, dict[str, str]] | None = None
         try:
-            match = categorizer_match(part, create_missing_category=False)
+            src = richer or part
+            match = categorizer_match(src, create_missing_category=False)
             path = match.category_path or ""
             top = path.split("/")[0] if path and not path.startswith("__") else None
             sub = path.split("/", 2)[1] if path and "/" in path else None
-            mapped = to_inventree_parameters(part, category_top=top, category_sub=sub)
+            mapped = to_inventree_parameters(src, category_top=top, category_sub=sub)
         except Exception:  # noqa: BLE001 — 映射失败不影响其它字段
             mapped = None
 
