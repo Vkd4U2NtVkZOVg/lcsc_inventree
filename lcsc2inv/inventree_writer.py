@@ -127,6 +127,32 @@ class InvenTreeWriter:
 
     # ---- public ---------------------------------------------------------
 
+    def _refetch_intl_params(
+        self, part: LCSCPart, code: str | None, *, fetcher: Fetcher | None
+    ) -> tuple[LCSCPart, bool]:
+        """数据贫瘠（≤1 条属性，即仅解析器注入的封装）时按 C-code 从国际站
+        补抓更全的参数（LCSC 偶发 403 限流，自动重试 3 次）。
+
+        Returns:
+            (用于参数映射的数据源, 补抓是否失败)——失败/无更全数据时返回原 part。
+        """
+        if len(part.additional_properties) > 1 or not re.fullmatch(r"C\d+", code or ""):
+            return part, False
+        f = fetcher or default_fetcher(self.settings)
+        for attempt in range(1, 4):
+            try:
+                candidate = f.fetch(code)
+                if len(candidate.additional_properties) > len(part.additional_properties):
+                    logger.info("国内站数据缺参数，按 %s 从国际站补抓参数", code)
+                    return candidate, False
+                return part, False
+            except LcscFetchError as exc:
+                logger.warning(
+                    "按 %s 补抓国际站参数失败（第 %s/3 次）: %s", code, attempt, exc
+                )
+                time.sleep(attempt)  # 1s/2s/3s 退避
+        return part, True
+
     def upsert_part(
         self,
         part: LCSCPart,
@@ -144,15 +170,23 @@ class InvenTreeWriter:
         if opts.dry_run:
             opts.create_stock = False  # dry-run 永远不建 StockItem
         try:
+            # 国内站页面（szlcsc）无参数表：数据贫瘠（≤1 条，仅注入的封装）
+            # 且 sku 是 C-code 时，从国际站补抓完整参数用于映射/描述后缀
+            # （描述正文/名称/图片仍用本次数据源）
+            src, _refetch_failed = self._refetch_intl_params(
+                part, part.sku, fetcher=opts.fetcher
+            )
+
             # 使用 create_missing_category 参数调用 categorizer
-            cat_match = categorizer_match(part, create_missing_category=create_missing_category)
+            # （分类也用补抓后的数据源：国际站分类更准，链路映射更全）
+            cat_match = categorizer_match(src, create_missing_category=create_missing_category)
             cat_pk = self._ensure_category(cat_match, dry_run=opts.dry_run)
             if cat_pk is None and cat_match.category_path != "__uncategorized__":
                 result.errors.append(f"无法创建类别 {cat_match.category_path}")
 
             # 分类映射参数只算一次：写 PartParameter + 描述后缀共用
             mapped = to_inventree_parameters(
-                part,
+                src,
                 category_top=(cat_match.category_path.split("/")[0]
                               if cat_match.category_path
                               and not cat_match.category_path.startswith("__")
@@ -655,34 +689,11 @@ class InvenTreeWriter:
         }
 
         # 国内站页面（szlcsc）的 ld+json 不带参数表（最多只有解析器注入的
-        # 一条「封装」）：若现有 Part 的 keywords 首段是 C-code，则按该编号
-        # 从国际站补抓**更全的参数**用于参数/描述参数段——描述正文仍用本次
-        # 抓取的数据源（用户选了什么源就显示什么源的内容）。
-        # LCSC 对数据中心 IP 偶发 403 限流（首次更新最常见），多试几次。
-        richer: LCSCPart | None = None
-        refetch_failed = False
-        if len(part.additional_properties) <= 1:
-            kw_first = (getattr(obj, "keywords", None) or "").split(",")[0].strip()
-            if re.fullmatch(r"C\d+", kw_first):
-                f = fetcher or default_fetcher(self.settings)
-                for attempt in range(1, 4):
-                    try:
-                        candidate = f.fetch(kw_first)
-                        if len(candidate.additional_properties) > len(part.additional_properties):
-                            richer = candidate
-                            logger.info(
-                                "国内站数据缺参数，按 %s 从国际站补抓参数（part_pk=%s）",
-                                kw_first, part_pk,
-                            )
-                        refetch_failed = False
-                        break
-                    except LcscFetchError as exc:
-                        refetch_failed = True
-                        logger.warning(
-                            "按 %s 补抓国际站参数失败（第 %s/3 次）: %s",
-                            kw_first, attempt, exc,
-                        )
-                        time.sleep(attempt)  # 1s/2s/3s 退避
+        # 一条「封装」）：按现有 Part 的 keywords 首段 C-code 从国际站补抓
+        # **更全的参数**用于参数/描述参数段——描述正文仍用本次抓取的数据源
+        #（用户选了什么源就显示什么源的内容）。
+        kw_first = (getattr(obj, "keywords", None) or "").split(",")[0].strip()
+        src, refetch_failed = self._refetch_intl_params(part, kw_first, fetcher=fetcher)
 
         package = self._resolve_package(part, footprint)
 
@@ -690,7 +701,6 @@ class InvenTreeWriter:
         # （数据源优先用参数更全的补抓结果）
         mapped: dict[str, dict[str, str]] | None = None
         try:
-            src = richer or part
             match = categorizer_match(src, create_missing_category=False)
             path = match.category_path or ""
             top = path.split("/")[0] if path and not path.startswith("__") else None

@@ -867,3 +867,64 @@ class TestUpdateAntiDowngrade:
         # 描述未被降级覆盖
         assert saved == [] or "description" not in saved[0]
         assert fetcher.fetch.call_count == 3  # 重试了 3 次
+
+
+class TestImportRefetchIntl:
+    def test_import_cn_part_refetches_params(self):
+        """国内站链接新导入：自动按 sku（C-code）补抓国际站参数。"""
+        from lcsc2inv.inventree_writer import InvenTreeWriter, WriteOptions
+        from lcsc2inv.lcsc_models import PropertyValue
+
+        w = _writer_new_api()
+        cn_part = LCSCPart(
+            sku="C2998180",
+            description="FRC0402F3571TS贴片电阻，价格￥0.0064元。",
+            additional_properties=[PropertyValue(name="封装", value="0402")],
+        )
+        intl_part = LCSCPart(
+            sku="C2998180",
+            category="Resistors/Chip Resistor - Surface Mount",
+            additional_properties=[
+                PropertyValue(name="Package", value="0402"),
+                PropertyValue(name="Resistance", value="3.57kΩ"),
+                PropertyValue(name="Tolerance", value="±1%"),
+            ],
+        )
+        fetcher = MagicMock()
+        # 首次抓取（国内站）发生在 upsert_part 之前；此处补抓直接返回国际站数据
+        fetcher.fetch.side_effect = [intl_part]
+
+        wp_calls: list = []
+
+        def _fake_wp(*a, **kw):
+            wp_calls.append(kw.get("mapped"))
+
+        param_written: list[tuple[str, str]] = []
+
+        def _fake_set(self, *, part_pk, name, value):
+            param_written.append((name, value))
+            return True
+
+        with patch.object(w, "_find_part_by_ipn", return_value=None), \
+             patch.object(w, "_ensure_category", return_value=7), \
+             patch.object(w, "_ensure_manufacturer", return_value=None), \
+             patch.object(w, "_ensure_supplier", return_value=11), \
+             patch.object(w, "_ensure_supplier_part", return_value=(22, True)), \
+             patch.object(w, "_replace_price_breaks"), \
+             patch.object(w, "_write_parameters", _fake_wp), \
+             patch.object(InvenTreeWriter, "set_named_parameter", _fake_set), \
+             patch("lcsc2inv.inventree_writer.Part") as PartMock:
+            PartMock.create.return_value = MagicMock(pk=99)
+            r = w.upsert_part(
+                cn_part, options=WriteOptions(fetcher=fetcher),
+            )
+        assert r.ok() is True, r.errors
+        # 补抓了一次（用 sku 的 C-code）
+        fetcher.fetch.assert_called_once_with("C2998180")
+        # 描述含国际站参数值
+        payload = PartMock.create.call_args.args[1]
+        assert "[参数: 3.57k | ±1% | 0402]" in payload["description"]
+        # _write_parameters 收到含 Value 的映射
+        assert wp_calls and any(
+            m and m.get("Value", {}).get("value") == "3.57k" for m in wp_calls
+        )
