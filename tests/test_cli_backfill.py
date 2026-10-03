@@ -137,7 +137,7 @@ class TestBackfillPackage:
         assert saved[1]["description"] == "10k 1% resistor（封装：0603） [参数: 0603]"
         assert saved[1]["keywords"] == "C111111,0603"
         # C28323：描述新增参数后缀（Base 链路 mapped 值）
-        assert saved[2]["description"] == "1uF cap 0805 [参数: ±10% | 50V | 0805]"
+        assert saved[2]["description"] == "1uF cap 0805 [参数: 1u | ±10% | 50V | 0805]"
         # Package 参数两者都写
         assert (1, "Package", "0603") in env.param_calls
         assert (2, "Package", "0805") in env.param_calls

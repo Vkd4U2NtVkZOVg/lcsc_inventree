@@ -7,6 +7,9 @@
 # 注意：如果同一 LCSC 字段名在多个 chain 中都声明，先出现的 chain 优先。
 
 Base:
+  # Value 放 Base（所有链路必含）：只要商品带 Resistance/Capacitance/Inductance
+  # 参数就写值，未匹配分类的零件（如国内站中文分类）也不会漏
+  Value:          [Resistance, Capacitance, Inductance]
   Tolerance:      [Tolerance]
   Rated Voltage:  ["Voltage Rating", "Voltage - Rated", "Rated Voltage"]
   Rated Current:  ["Current Rating", "Rated Current"]
@@ -14,10 +17,9 @@ Base:
   Package:        [Package, 封装, "Package Type"]
   Operating Temperature: [Operating Temperature]
 
-# Passives：基本元件（电阻/电容/电感）共用 Value 字段，按实际类别取第一个存在的
+# Passives：基本元件（电阻/电容/电感）共用 Value 字段（继承自 Base）
 Passives:
   parent: [Base]
-  Value: [Resistance, Capacitance, Inductance]
 
 Resistors:
   parent: [Passives]
