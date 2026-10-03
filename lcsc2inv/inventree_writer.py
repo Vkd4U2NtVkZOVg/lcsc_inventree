@@ -764,7 +764,9 @@ class InvenTreeWriter:
         if update_name and name:
             payload["name"] = name[:100]
         if update_description and description is not None:
-            payload["description"] = description[:250]
+            payload["description"] = self._with_params_suffix(
+                description, parameters
+            )[:250]
         if update_keywords and keywords:
             payload["keywords"] = keywords
         if update_notes:
@@ -1174,7 +1176,10 @@ class InvenTreeWriter:
 
         payload: dict[str, Any] = {
             "name": (name or ipn)[:100],
-            "description": (description or "")[:250],
+            # 参数值并入描述（全局搜索可按品牌/型号等命中）
+            "description": self._with_params_suffix(
+                description or "", parameters
+            )[:250],
             "IPN": ipn,
             "active": True,
             "purchaseable": True,

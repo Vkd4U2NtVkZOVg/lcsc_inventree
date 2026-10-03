@@ -546,7 +546,7 @@ class TestUpdateCustomPartFields:
                 parameters={"品牌": "XF"}, image_data=(PNG_BYTES, ".png"),
                 update_name=True, update_notes=True, update_parameters=True,
             )
-        assert saved[0] == {"name": "新名称", "description": "新描述",
+        assert saved[0] == {"name": "新名称", "description": "新描述 [参数: XF]",
                             "keywords": "淘宝,店", "notes": "备注",
                             "link": "https://item.taobao.com/x"}
         assert r["updated_fields"] == sorted(saved[0].keys())
@@ -669,3 +669,32 @@ class TestParamSanitize:
         w._rest = rest
         assert w.set_named_parameter(part_pk=1, name="  ", value="v") is False
         assert rest.calls == []
+
+
+class TestUpsertCustomPartDescSuffix:
+    def test_description_includes_params(self):
+        """upsert_custom_part 创建时参数值并入描述（可搜索）。"""
+        from lcsc2inv.inventree_writer import InvenTreeWriter
+
+        w = InvenTreeWriter.__new__(InvenTreeWriter)
+        w.api = MagicMock()
+        w.settings = MagicMock()
+        w.supplier_name = "LCSC Electronics"
+        w._mfr_cache, w._supplier_cache = {}, {}
+        w._category_cache, w._template_cache = {}, {}
+        with patch.object(w, "_find_part_by_ipn", return_value=None), \
+             patch.object(w, "_ensure_manufacturer", return_value=None), \
+             patch.object(w, "_ensure_supplier", return_value=11), \
+             patch.object(w, "_ensure_supplier_part", return_value=(22, True)), \
+             patch.object(w, "_replace_price_breaks"), \
+             patch.object(w, "set_named_parameter", return_value=True), \
+             patch("lcsc2inv.inventree_writer.Part") as PartMock:
+            PartMock.create.return_value = MagicMock(pk=7)
+            r = w.upsert_custom_part(
+                ipn="TB1", name="麦片", description="降噪硅麦",
+                parameters={"品牌": "XF", "型号": "3729"},
+                image_data=None,
+            )
+        assert r.ok() is True
+        payload = PartMock.create.call_args.args[1]
+        assert payload["description"] == "降噪硅麦 [参数: XF | 3729]"
