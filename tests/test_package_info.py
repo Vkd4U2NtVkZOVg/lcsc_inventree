@@ -203,7 +203,7 @@ class TestSetPackageParameter:
         w = _writer_new_api()
         rest = _RestStub([
             (200, [{"pk": 7, "name": "Package"}]),     # 模板已存在
-            (200, [{"pk": 5, "template": 7, "data": "old"}]),
+            (200, [{"pk": 5, "template": "Package", "data": "old"}]),
             (200, {}),
         ])
         w._rest = rest
@@ -215,7 +215,7 @@ class TestSetPackageParameter:
         w = _writer_new_api()
         rest = _RestStub([
             (200, [{"pk": 7, "name": "Package"}]),
-            (200, [{"pk": 5, "template": 7, "data": "0805"}]),
+            (200, [{"pk": 5, "template": "Package", "data": "0805"}]),
         ])
         w._rest = rest
         assert w.set_package_parameter(part_pk=1, value="0805") is True
@@ -229,7 +229,7 @@ class TestSetPackageParameter:
             (404, {"detail": "Not found"}),            # 探测 new 端点 → 失败
             (200, [{"pk": 9, "name": "Other"}]),       # 探测 old 端点 → 成功
             (200, [{"pk": 7, "name": "Package"}]),     # old 模板列表
-            (200, [{"pk": 5, "template": 7, "value": "old"}]),
+            (200, [{"pk": 5, "template": "Package", "value": "old"}]),
             (200, {}),
         ])
         w._rest = rest
@@ -283,7 +283,7 @@ class TestWriteParametersRest:
         )
         w = _writer_new_api()
         rest = _RestStub([
-            (200, [{"pk": 90, "template": 7, "data": "0603"}]),  # 已有旧值
+            (200, [{"pk": 90, "template": "Package", "data": "0603"}]),  # 已有旧值
             (200, [{"pk": 7, "name": "Package"}]),               # 模板
             (200, {}),                                            # PATCH
         ])
@@ -320,8 +320,7 @@ class TestGetPackageParameter:
     def test_returns_existing_value(self):
         w = _writer_new_api()
         rest = _RestStub([
-            (200, [{"pk": 7, "name": "Package"}]),
-            (200, [{"pk": 5, "template": 7, "data": "0805"}]),
+            (200, [{"pk": 5, "template": "Package", "data": "0805"}]),
         ])
         w._rest = rest
         assert w.get_package_parameter(part_pk=1) == "0805"

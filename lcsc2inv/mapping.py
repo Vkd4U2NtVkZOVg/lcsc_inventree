@@ -15,20 +15,22 @@ from lcsc2inv.config import load_yaml
 from lcsc2inv.lcsc_models import LCSCPart
 
 # 通用单位映射（Ki-nTree style；用于把 `Resistance: 10kΩ` 改成 `Resistance: 10k`）
+# 每条模式末尾的 (?![a-zA-Z]) 词尾前瞻：防止吞掉更长单词里的字母
+#（如 "SMD,P=0.4mm" 的 mm 被当成 mega → "0.4Mm"）
 _UNIT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # 电阻：k / kilo / kΩ / kOhm / kOhms -> k（顺带消化 Ω / ohm 后缀）
     # 注意：alternation 用左到右最长优先，先放长的（ohms 在前）
-    (re.compile(r"(\d+(?:\.\d+)?)\s*(?:k|kilo)\s*(?:Ω|ohms|ohms?|ohm)?", re.IGNORECASE), r"\1k"),
-    (re.compile(r"(\d+(?:\.\d+)?)\s*(?:M|meg)\s*(?:Ω|ohms|ohms?|ohm)?", re.IGNORECASE), r"\1M"),
-    (re.compile(r"(\d+(?:\.\d+)?)\s*(?:Ω|ohms|ohms?|ohm)?", re.IGNORECASE), r"\1"),
+    (re.compile(r"(\d+(?:\.\d+)?)\s*(?:k|kilo)\s*(?:Ω|ohms|ohms?|ohm)?(?![a-zA-Z])", re.IGNORECASE), r"\1k"),
+    (re.compile(r"(\d+(?:\.\d+)?)\s*(?:M|meg)\s*(?:Ω|ohms|ohms?|ohm)?(?![a-zA-Z])", re.IGNORECASE), r"\1M"),
+    (re.compile(r"(\d+(?:\.\d+)?)\s*(?:Ω|ohms|ohms?|ohm)?(?![a-zA-Z])", re.IGNORECASE), r"\1"),
     # 电容：pF / nF / uF / μF -> p / n / u
-    (re.compile(r"(\d+(?:\.\d+)?)\s*(?:pF|picoF|pf)", re.IGNORECASE), r"\1p"),
-    (re.compile(r"(\d+(?:\.\d+)?)\s*(?:nF|nanoF|nf)", re.IGNORECASE), r"\1n"),
-    (re.compile(r"(\d+(?:\.\d+)?)\s*(?:uF|microF|μF|uf)", re.IGNORECASE), r"\1u"),
+    (re.compile(r"(\d+(?:\.\d+)?)\s*(?:pF|picoF|pf)(?![a-zA-Z])", re.IGNORECASE), r"\1p"),
+    (re.compile(r"(\d+(?:\.\d+)?)\s*(?:nF|nanoF|nf)(?![a-zA-Z])", re.IGNORECASE), r"\1n"),
+    (re.compile(r"(\d+(?:\.\d+)?)\s*(?:uF|microF|μF|uf)(?![a-zA-Z])", re.IGNORECASE), r"\1u"),
     # 电压 / 电流 / 功率：保留数值与单位
-    (re.compile(r"(\d+(?:\.\d+)?)\s*(mV|millivolt)", re.IGNORECASE), r"\1mV"),
-    (re.compile(r"(\d+(?:\.\d+)?)\s*(mA|milliamp)", re.IGNORECASE), r"\1mA"),
-    (re.compile(r"(\d+(?:\.\d+)?)\s*(mW|milliwatt)", re.IGNORECASE), r"\1mW"),
+    (re.compile(r"(\d+(?:\.\d+)?)\s*(mV|millivolt)(?![a-zA-Z])", re.IGNORECASE), r"\1mV"),
+    (re.compile(r"(\d+(?:\.\d+)?)\s*(mA|milliamp)(?![a-zA-Z])", re.IGNORECASE), r"\1mA"),
+    (re.compile(r"(\d+(?:\.\d+)?)\s*(mW|milliwatt)(?![a-zA-Z])", re.IGNORECASE), r"\1mW"),
 ]
 
 _PAREN_TRAIL_RE = re.compile(r"\s*\([^)]*\)\s*$")  # "10nF (X7R)" -> "10nF"

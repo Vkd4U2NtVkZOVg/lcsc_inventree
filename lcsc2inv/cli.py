@@ -374,18 +374,36 @@ def backfill_package(
     writer = InvenTreeWriter(api, settings)
     fetcher = default_fetcher(settings)
 
-    # 1. 扫描 InvenTree，收集 IPN 是 LCSC 编号的 Part
+    # 1. 扫描 InvenTree，收集 LCSC 器件。识别优先级：
+    #    IPN 是 LCSC 编号 → keywords 首段是 LCSC 编号（早期导入 IPN 为空的零件，
+    #    如 Part 1507）→ link 是 szlcsc 商品链接
+    keyword_ipn_re = re.compile(r"(?:C\d+|CN:\d+)")
+    szlcsc_re = re.compile(r"item\.szlcsc\.com/(\d+)\.html")
     targets: list[dict[str, Any]] = []
     for p in Part.list(api):
         ipn = (getattr(p, "IPN", None) or "").strip()
-        if not _LCSC_IPN_RE.fullmatch(ipn):
+        keywords = getattr(p, "keywords", None) or ""
+        link = getattr(p, "link", None) or ""
+        code = ""
+        if _LCSC_IPN_RE.fullmatch(ipn):
+            code = ipn
+        else:
+            # keywords 首段：导入时固定为 LCSC 编号（"C11626,MPN,品牌,…"）
+            first_kw = keywords.split(",")[0].strip() if keywords else ""
+            if keyword_ipn_re.fullmatch(first_kw):
+                code = first_kw
+            elif ipn == "" and link:
+                m = szlcsc_re.search(link)
+                if m:
+                    code = f"CN:{m.group(1)}"
+        if not code:
             continue
         targets.append(
             {
                 "pk": p.pk,
-                "ipn": ipn,
+                "ipn": code,
                 "description": getattr(p, "description", None) or "",
-                "keywords": getattr(p, "keywords", None) or "",
+                "keywords": keywords,
             }
         )
     targets.sort(key=lambda t: t["ipn"])

@@ -909,13 +909,11 @@ class InvenTreeWriter:
         """读取 Part 当前的 Package 参数值；模板或参数不存在返回 None。
 
         只读：不会创建模板/参数（与 `_ensure_template` 的区别）。
+        `_list_part_parameters` 的 template 已归一化为模板名，直接按名匹配。
         """
-        tpl_pk = self._find_template("Package")
-        if tpl_pk is None:
-            return None
         cur = next(
             (pp for pp in self._list_part_parameters(part_pk)
-             if pp["template"] == tpl_pk),
+             if pp["template"] == "Package"),
             None,
         )
         return cur["value"] if cur else None
@@ -933,7 +931,8 @@ class InvenTreeWriter:
         )
         if not params:
             return
-        # {template_pk: (parameter_pk, value)}
+        # {模板名: (parameter_pk, value)} —— _list_part_parameters 的
+        # template 已归一化为模板名，按名匹配（与 set_named_parameter 一致）
         existing = {
             pp["template"]: (pp["pk"], pp["value"])
             for pp in self._list_part_parameters(part_pk)
@@ -948,7 +947,7 @@ class InvenTreeWriter:
             tpl_pk = self._ensure_template(inv_name)
             if tpl_pk is None:
                 continue
-            cur = existing.get(tpl_pk)
+            cur = existing.get(inv_name)
             if cur is not None:
                 if cur[1] == value:
                     continue
@@ -986,9 +985,10 @@ class InvenTreeWriter:
         tpl_pk = self._ensure_template(name)
         if tpl_pk is None:
             return False
+        # _list_part_parameters 的 template 已归一化为模板名，按名匹配
         cur = next(
             (pp for pp in self._list_part_parameters(part_pk)
-             if pp["template"] == tpl_pk),
+             if pp["template"] == name),
             None,
         )
         if cur is not None and cur["value"] == value:

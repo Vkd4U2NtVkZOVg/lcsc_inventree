@@ -95,3 +95,13 @@ def test_part_notes_without_package():
     """没有封装时不输出 Package 行。"""
     part = LCSCPart(sku="C1")
     assert "- **Package**" not in to_part_notes(part)
+
+def test_clean_units_do_not_eat_words():
+    """单位归一化不得吞掉长单词中的字母（如封装里的 mm）。"""
+    assert clean_parameter_value("SMD,P=0.4mm") == "SMD,P=0.4mm"
+    assert clean_parameter_value("Pitch,0.5mm") == "Pitch,0.5mm"
+    # 常规单位行为不变
+    assert clean_parameter_value("10kΩ") == "10k"
+    assert clean_parameter_value("100nF") == "100n"
+    assert clean_parameter_value("62.5mW") == "62.5mW"
+    assert clean_parameter_value("100Ω") == "100"
