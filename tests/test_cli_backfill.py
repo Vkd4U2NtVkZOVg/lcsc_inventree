@@ -70,17 +70,25 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr("lcsc2inv.cli.default_fetcher", lambda s: fake_fetcher)
     monkeypatch.setattr("inventree.part.Part", FakePart)
 
-    param_calls: list[tuple[int, str]] = []
+    param_calls: list[tuple[int, str, str]] = []  # (part_pk, name, value)
     param_values: dict[int, str] = {}  # pk -> 已存在的 Package 参数值
 
-    def _fake_set_param(self, *, part_pk, value):
-        param_calls.append((part_pk, value))
+    def _fake_set_named(self, *, part_pk, name, value):
+        param_calls.append((part_pk, name, value))
         return True
 
-    monkeypatch.setattr(InvenTreeWriter, "set_package_parameter", _fake_set_param)
+    monkeypatch.setattr(InvenTreeWriter, "set_named_parameter", _fake_set_named)
+    # 分类匹配 + 参数现状（ctx 参数对比用）：默认 Part 无任何参数
     monkeypatch.setattr(
-        InvenTreeWriter, "get_package_parameter",
-        lambda self, *, part_pk: param_values.get(part_pk),
+        "lcsc2inv.cli.categorizer_match",
+        lambda part, **kw: SimpleNamespace(category_path="__uncategorized__"),
+    )
+    monkeypatch.setattr(
+        InvenTreeWriter, "_list_part_parameters",
+        lambda self, part_pk: (
+            [{"pk": 0, "template": "Package", "value": param_values[part_pk]}]
+            if part_pk in param_values else []
+        ),
     )
 
     return SimpleNamespace(
@@ -131,8 +139,8 @@ class TestBackfillPackage:
         # C28323：描述/keywords 已含封装 → 无字段保存，仅参数
         assert 2 not in saved
         # Package 参数两者都写
-        assert (1, "0603") in env.param_calls
-        assert (2, "0805") in env.param_calls
+        assert (1, "Package", "0603") in env.param_calls
+        assert (2, "Package", "0805") in env.param_calls
         assert "写入失败 0" in result.output
 
     def test_comma_package_keyword_dedup(self, env):
@@ -187,8 +195,8 @@ class TestBackfillPackage:
         assert 3 not in saved  # 描述/keywords 已含封装
         assert saved[4]["description"] == "RJ45 连接器（封装：弯插）"
         assert saved[4]["keywords"] == "C1,弯插"
-        assert (3, "弯插") in env.param_calls
-        assert (4, "弯插") in env.param_calls
+        assert (3, "Package", "弯插") in env.param_calls
+        assert (4, "Package", "弯插") in env.param_calls
 
     def test_no_package_and_fetch_failure_counted(self, env):
         FakePart.rows = [
@@ -233,10 +241,10 @@ class TestBackfillPackage:
     def test_write_error_counted(self, env, monkeypatch):
         FakePart.rows = [_inv_part(1, "C111111", description="x")]
 
-        def _boom(self, *, part_pk, value):
+        def _boom(self, *, part_pk, name, value):
             raise RuntimeError("api down")
 
-        monkeypatch.setattr(InvenTreeWriter, "set_package_parameter", _boom)
+        monkeypatch.setattr(InvenTreeWriter, "set_named_parameter", _boom)
         env.parts_by_code["C111111"] = _c_part("C111111", "0603")
 
         result = CliRunner(env={"COLUMNS": "300"}).invoke(cli_group, ["backfill-package", "--commit"])

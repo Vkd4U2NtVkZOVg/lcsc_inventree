@@ -352,16 +352,19 @@ _LCSC_IPN_RE = re.compile(r"(?:C\d+|CN:\d+)")
 def backfill_package(
     ctx: click.Context, dry_run: bool | None, limit: int | None
 ) -> None:
-    """为 InvenTree 中所有 LCSC 导入的器件回填封装信息。
+    """为 InvenTree 中所有 LCSC 导入的器件回填封装与参数。
 
     扫描 IPN 为 LCSC 编号（C123456 / CN:123456）的 Part，从 LCSC 重新抓取
-    封装数据（1 req/s 限速 + 本地 HTML 缓存，重复执行很快），然后：
+    （1 req/s 限速 + 本地 HTML 缓存，重复执行很快），然后：
 
     \b
     - 描述尾部追加（封装：xxx）——基于 InvenTree 现有描述修改，不覆盖手工改动，
       描述里已含该封装串时跳过；
     - 写 `Package` 参数（模板不存在则自动创建）；
-    - keywords 追加封装串。
+    - keywords 追加封装串；
+    - 补全 field_map.yaml 分类映射的其它参数（Value/Tolerance/ Rated Voltage…，
+      即早期 SDK 门禁期导入缺失的那批）——只新增/更新 LCSC 侧有值的参数，
+      不删除已有参数。
     """
     _common_dry_run(ctx, dry_run)
     settings = get_settings()
@@ -431,45 +434,70 @@ def backfill_package(
         if new_kw != t["keywords"]:
             payload["keywords"] = new_kw
 
+        # 3. 分类映射参数（Value/Tolerance/Rated Voltage…，SDK 门禁期缺失的那批）
+        #    走与导入一致的映射链路；Package 单独处理避免重复写
+        cat_match = categorizer_match(part)
+        mapped = to_inventree_parameters(
+            part,
+            category_top=cat_match.category_path.split("/")[0] if cat_match.category_path and not cat_match.category_path.startswith("__") else None,
+            category_sub=(
+                cat_match.category_path.split("/", 2)[1]
+                if cat_match.category_path and "/" in cat_match.category_path
+                and not cat_match.category_path.startswith("__")
+                else None
+            ),
+        )
+        mapped = {k: v["value"] for k, v in mapped.items() if v.get("value")}
+        if package:
+            mapped["Package"] = package
         # 参数现状（只读查询；dry-run 也查，保证预览真实）
-        param_cur = writer.get_package_parameter(part_pk=t["pk"])
-        param_pending = param_cur != package
+        try:
+            existing_params = {
+                pp["template"]: pp["value"]
+                for pp in writer._list_part_parameters(t["pk"])
+            }
+        except RuntimeError:
+            existing_params = None  # 查询失败时视为未知，跳过参数对比
+        param_pending: dict[str, str] = {}
+        if existing_params is not None:
+            for pname, pvalue in mapped.items():
+                if existing_params.get(pname) != pvalue:
+                    param_pending[pname] = pvalue
 
         if settings.dry_run:
-            stats["todo"] += 1
-            if payload and param_pending:
+            if payload or param_pending:
+                stats["todo"] += 1
+                bits = []
+                if payload:
+                    bits.append("描述/keywords")
+                if param_pending:
+                    bits.append("参数 " + ",".join(
+                        f"{k}={v}" for k, v in sorted(param_pending.items())
+                    ))
                 console.print(
                     f"[cyan][{i}/{total}] {code}: 封装 {package} → "
-                    f"描述/keywords + Package 参数 将更新[/cyan]"
-                )
-            elif payload:
-                console.print(
-                    f"[cyan][{i}/{total}] {code}: 封装 {package} → "
-                    f"仅描述/keywords 将更新[/cyan]"
-                )
-            elif param_pending:
-                console.print(
-                    f"[cyan][{i}/{total}] {code}: 封装 {package} → "
-                    f"仅补 Package 参数[/cyan]"
+                    f"{' + '.join(bits)} 将更新[/cyan]"
                 )
             else:
-                stats["todo"] -= 1
                 stats["ok"] += 1
             continue
 
-        # 3. 写入（幂等：重复执行无副作用）
+        # 4. 写入（幂等：重复执行无副作用）
         try:
             if payload:
                 Part(api, t["pk"]).save(payload)
-            if param_pending:
-                if not writer.set_package_parameter(part_pk=t["pk"], value=package):
-                    raise RuntimeError("Package 参数模板不可用（查询/创建失败）")
+            for pname, pvalue in param_pending.items():
+                if not writer.set_named_parameter(
+                    part_pk=t["pk"], name=pname, value=pvalue
+                ):
+                    raise RuntimeError(f"参数 {pname} 模板不可用（查询/创建失败）")
             if payload or param_pending:
                 stats["todo"] += 1
                 console.print(
                     f"[green][{i}/{total}] {code}: {package} ✓ "
                     f"{'描述/keywords ' if payload else ''}"
-                    f"{'+ Package 参数' if param_pending else ''}已回填[/green]"
+                    f"{'+ 参数 ' + ','.join(param_pending) if param_pending else ''}"
+                    f"已回填[/green]"
                 )
             else:
                 stats["ok"] += 1
