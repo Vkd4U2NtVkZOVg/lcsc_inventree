@@ -1142,6 +1142,10 @@ def api_taobao_import():
             sku_text = (row.get("sku_text") or "").strip() or item.selected_sku
             image_url = (row.get("image_url") or "").strip() or item.main_image_url()
             image_data = item.embedded_bytes(image_url) if image_url else None
+            description = (row.get("description") or "").strip() or item.default_description()
+            supplier_sku = (row.get("supplier_sku") or "").strip()
+            if not supplier_sku:
+                supplier_sku = f"TB{item.item_id}-{sku_text}" if item.item_id and sku_text else (f"TB{item.item_id}" if item.item_id else ipn)
             qty_in = row.get("qty")
             try:
                 qty = int(qty_in) if qty_in not in (None, "", "0", 0) else None
@@ -1160,14 +1164,14 @@ def api_taobao_import():
             result = writer.upsert_custom_part(
                 ipn=ipn,
                 name=name,
-                description=item.default_description(),
+                description=description,
                 notes=_taobao_notes(item, price, sku_text),
                 keywords=keywords,
                 link=item.url,
                 category_pk=category_id,
                 manufacturer_name=mfr_name,
                 supplier_name=supplier_name,
-                sku=f"TB{item.item_id}" if item.item_id else ipn,
+                sku=supplier_sku,
                 price=price,
                 currency="CNY",
                 parameters=params,

@@ -21,7 +21,7 @@
          color:#1f2328; }
   nav#tabs button:hover { background:#f0f2f6; }
   nav#tabs button.active { background:var(--brand); color:#fff; }
-  .wrap { flex:1; padding:24px 28px 60px; max-width:1080px; }
+  .wrap { flex:1; padding:24px 28px 60px; max-width:1600px; width:100%; }
   /* 窄屏：侧边栏折叠为顶部横排 */
   @media (max-width:820px) {
     body { flex-direction:column; }
@@ -1404,62 +1404,52 @@ function updateTbSkuPreview(i){
     strip.outerHTML = html;
   }
 }
-function renderTbRows(){
-  var el = $("t-rows");
-  if(!tbItems.length){ el.innerHTML = '<p class="dim">无数据</p>'; return; }
-  var html = '<div style="overflow-x:auto;">' +
-    '<table style="min-width:980px;"><tr>' +
-    '<th style="white-space:nowrap;">导入</th>' +
-    '<th style="white-space:nowrap;">IPN</th>' +
-    '<th style="white-space:nowrap;min-width:180px;">名称（标题）</th>' +
-    '<th style="white-space:nowrap;">价格¥</th>' +
-    '<th style="white-space:nowrap;">入库数</th>' +
-    '<th style="white-space:nowrap;">库存条码</th>' +
-    '<th style="white-space:nowrap;">规格（SKU）</th>' +
-    '<th style="white-space:nowrap;">主图</th>' +
-    '<th style="white-space:nowrap;">信息</th></tr>';
-  tbItems.forEach(function(it, i){
-    var skuSel;
-    if((it.skus || []).length){
-      skuSel = '<select class="t-sku" data-i="' + i + '" style="width:160px;">';
-      it.skus.forEach(function(s){
-        skuSel += '<option value="' + esc(s.text) + '"' +
-          (s.text === (it.selected_sku || "") ? " selected" : "") + '>' +
-          esc(s.text) + '</option>';
-      });
-      skuSel += '</select>';
-    } else {
-      skuSel = '<span class="dim">单规格</span>';
-    }
-    var imgOpts = tbImgOptions(it);
-    var imgSel = '<select class="t-img" data-i="' + i + '" style="width:140px;">';
-    imgOpts.forEach(function(u, k){
-      imgSel += '<option value="' + esc(u) + '"' +
-        (u === (it.image_url || "") ? " selected" : "") + '>' +
-        esc(k === 0 ? "主图（选中规格）" : tbShorten(u)) + '</option>';
+function tbSkuIpn(it, sku, index){
+  var base = it.item_id || "item";
+  var suffix = sku && sku.id ? sku.id : String(index + 1);
+  return "TB" + base + "-" + suffix.replace(/[^A-Za-z0-9_-]+/g, "-").slice(0, 32);
+}
+function tbRows(){
+  var rows = [];
+  tbItems.forEach(function(it){
+    var skus = it.skus && it.skus.length ? it.skus : [{text: it.selected_sku || "", image_url: it.image_url || null, selected: true}];
+    skus.forEach(function(sku, index){
+      var skuText = sku.text || "";
+      var imageUrl = sku.image_url || it.image_url || (it.gallery || [])[0] || null;
+      rows.push({item:it, sku:sku, index:index, skuText:skuText, imageUrl:imageUrl,
+        ipn:tbSkuIpn(it, sku, index), name:it.title + (skuText ? "（" + skuText + "）" : "")});
     });
-    imgSel += '</select>';
-    var thumbs = tbThumbHtml(it, imgOpts);
-    var shop = it.shop || "";
-    var info = [];
-    if(shop) info.push('店铺 ' + esc(shop.length > 12 ? shop.slice(0, 12) + "…" : shop));
-    info.push('参数 ' + ((it.params || []).length));
-    info.push(it.image_available ? '图✅' : '图⚠');
-    html += '<tr>' +
-      '<td style="text-align:center;"><input type="checkbox" class="t-row-check" data-i="' + i + '" checked></td>' +
-      '<td><input class="t-ipn mono" data-i="' + i + '" value="' + esc(it.ipn || "") + '" style="width:132px;"></td>' +
-      '<td><input class="t-name" data-i="' + i + '" value="' + esc(it.name || "") + '" style="width:100%;min-width:170px;"></td>' +
-      '<td><input class="t-price mono" data-i="' + i + '" value="' + (it.price != null ? it.price : "") + '" style="width:70px;"></td>' +
-      '<td><input type="number" class="t-qty mono" data-i="' + i + '" min="0" placeholder="0" style="width:62px;"></td>' +
-      '<td><input class="t-barcode mono" data-i="' + i + '" placeholder="扫码/手输" title="填写并入库后绑定到该笔库存" style="width:126px;"></td>' +
-      '<td>' + skuSel + '</td>' +
-      '<td>' + imgSel + thumbs + '</td>' +
-      '<td style="white-space:nowrap;font-size:12px;color:var(--dim);">' + info.join(' · ') + '</td>' +
-      '</tr>';
   });
-  el.innerHTML = html + "</table></div>";
-  document.querySelectorAll(".t-sku").forEach(function(sel){
-    sel.addEventListener("change", function(){ updateTbSkuPreview(parseInt(this.dataset.i, 10)); });
+  return rows;
+}
+function renderTbRows(){
+  var el = $("t-rows"), rows = tbRows();
+  if(!rows.length){ el.innerHTML = '<p class="dim">无数据</p>'; return; }
+  var html = '<div style="overflow-x:auto;"><table style="min-width:1150px;"><tr>' +
+    '<th><label style="white-space:nowrap;cursor:pointer;"><input type="checkbox" id="t-select-all" checked> 全选</label></th><th>IPN（每个规格独立）</th><th style="min-width:180px;">名称</th><th>价格¥</th><th>入库数</th><th>库存条码</th><th>规格（SKU）</th><th>主图</th><th>信息</th></tr>';
+  rows.forEach(function(r, i){
+    var it=r.item, src=r.imageUrl ? tbImagePreviewUrl(it,r.imageUrl) : "";
+    var thumb = src ? '<div class="t-thumb-strip" data-i="'+i+'"><img src="'+esc(src)+'" alt="'+esc(r.skuText||"商品图片")+'" loading="lazy" title="规格：'+esc(r.skuText||"默认")+'，点击查看大图" style="width:64px;height:64px;object-fit:cover;border:1px solid #d7dce5;border-radius:4px;cursor:zoom-in;" onclick="openTbImagePreview(\''+esc(src).replace(/'/g,"\\'")+'\')"></div>' : '<span class="dim">无图</span>';
+    html += '<tr><td><input type="checkbox" class="t-row-check" data-i="'+i+'" checked></td>'+
+      '<td><input class="t-ipn mono" data-i="'+i+'" value="'+esc(r.ipn)+'" style="width:160px;"></td>'+
+      '<td><input class="t-name" data-i="'+i+'" value="'+esc(r.name)+'" style="width:100%;min-width:220px;"></td>'+
+      '<td><input class="t-price mono" data-i="'+i+'" value="'+(it.price!=null?it.price:"")+'" style="width:70px;"></td>'+
+      '<td><input type="number" class="t-qty mono" data-i="'+i+'" min="0" placeholder="0" style="width:62px;"></td>'+
+      '<td><input class="t-barcode mono" data-i="'+i+'" placeholder="扫码/手输" style="width:126px;"></td>'+
+      '<td><span class="mono">'+esc(r.skuText||"单规格")+'</span></td><td>'+thumb+'</td>'+
+      '<td style="font-size:12px;color:var(--dim);">'+esc(it.shop||"")+' · 参数 '+((it.params||[]).length)+'</td></tr>';
+  });
+  el.innerHTML = html + '</table></div>';
+  $("t-select-all").addEventListener("change", function(){
+    document.querySelectorAll(".t-row-check").forEach(function(cb){ cb.checked = this.checked; }, this);
+  });
+  document.querySelectorAll(".t-row-check").forEach(function(cb){
+    cb.addEventListener("change", function(){
+      var all = document.querySelectorAll(".t-row-check");
+      var checked = document.querySelectorAll(".t-row-check:checked");
+      $("t-select-all").checked = all.length === checked.length;
+      $("t-select-all").indeterminate = checked.length > 0 && checked.length < all.length;
+    });
   });
 }
 $("t-parse").onclick = async function(){
@@ -1489,21 +1479,21 @@ $("t-parse").onclick = async function(){
 };
 $("t-run").onclick = async function(){
   if(!tbItems.length){ setStatus("t-status", "请先解析", "err"); return; }
-  var rows = [];
+  var rows = [], displayRows = tbRows();
   document.querySelectorAll(".t-row-check").forEach(function(cb){
     if(!cb.checked) return;
-    var i = parseInt(cb.dataset.i, 10);
-    var skuEl = document.querySelector('.t-sku[data-i="' + i + '"]');
-    var imgEl = document.querySelector('.t-img[data-i="' + i + '"]');
+    var i = parseInt(cb.dataset.i, 10), r = displayRows[i];
     rows.push({
-      token: tbItems[i].token,
+      token: r.item.token,
       ipn: document.querySelector('.t-ipn[data-i="' + i + '"]').value.trim(),
       name: document.querySelector('.t-name[data-i="' + i + '"]').value.trim(),
+      description: r.name,
       price: document.querySelector('.t-price[data-i="' + i + '"]').value.trim() || null,
       qty: document.querySelector('.t-qty[data-i="' + i + '"]').value.trim() || null,
       stock_barcode: document.querySelector('.t-barcode[data-i="' + i + '"]').value.trim() || null,
-      sku_text: skuEl && skuEl.value ? skuEl.value : null,
-      image_url: imgEl && imgEl.value ? imgEl.value : null,
+      sku_text: r.skuText || null,
+      supplier_sku: "TB" + (r.item.item_id || "item") + "-" + (r.index + 1),
+      image_url: r.imageUrl || null,
       action: "create"
     });
   });
