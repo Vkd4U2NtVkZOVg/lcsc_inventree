@@ -959,6 +959,44 @@ def _taobao_notes(item: TaobaoItem, price: float | None, sku_text: str | None) -
     return "\n".join(lines)
 
 
+@app.route("/api/taobao/image", methods=["GET"])
+def api_taobao_image():
+    """返回淘宝 MHTML 中内嵌的商品图片，供导入预览使用。"""
+    token = (request.args.get("token") or "").strip()
+    image_url = (request.args.get("url") or "").strip()
+    if not _TAOBAO_TOKEN_RE.fullmatch(token):
+        return jsonify({"ok": False, "error": "非法或缺少淘宝解析 token"}), 400
+    if not image_url:
+        return jsonify({"ok": False, "error": "缺少图片 URL"}), 400
+
+    with _taobao_cache_lock:
+        item = _taobao_cache.get(token)
+    if item is None:
+        item = _taobao_disk_load(token)
+        if item is not None:
+            _taobao_cache_put(item, token=token)
+    if item is None:
+        return jsonify({"ok": False, "error": "淘宝解析结果已过期，请重新上传"}), 404
+
+    allowed_urls = set(item.gallery) | {s.image_url for s in item.skus if s.image_url}
+    if image_url not in allowed_urls:
+        return jsonify({"ok": False, "error": "图片不属于该淘宝商品"}), 404
+
+    embedded = item.embedded_bytes(image_url)
+    if not embedded:
+        return jsonify({"ok": False, "error": "MHTML 中没有该图片的内嵌数据"}), 404
+
+    data, ext = embedded
+    mimetype = {
+        ".webp": "image/webp",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+    }.get(ext.lower(), "application/octet-stream")
+    return send_file(io.BytesIO(data), mimetype=mimetype, max_age=0)
+
+
 @app.route("/api/taobao/parse", methods=["POST"])
 def api_taobao_parse():
     """解析上传的淘宝商品页 .mhtml（可多选），返回预览数据与缓存令牌。

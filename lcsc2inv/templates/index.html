@@ -341,6 +341,10 @@
       <div class="status" id="t-status"></div>
       <div id="t-result"></div>
     </div>
+    <div id="tb-image-modal" style="display:none;position:fixed;z-index:1000;inset:0;background:rgba(0,0,0,.78);align-items:center;justify-content:center;padding:24px;" role="dialog" aria-label="淘宝图片预览">
+      <button id="tb-image-modal-close" type="button" style="position:absolute;top:18px;right:24px;border:0;background:#fff;color:#222;border-radius:50%;width:36px;height:36px;font-size:22px;cursor:pointer;">×</button>
+      <img id="tb-image-modal-img" alt="淘宝商品大图" style="max-width:95vw;max-height:90vh;object-fit:contain;border-radius:8px;background:#fff;">
+    </div>
   </section>
 
   <!-- 快速入库 -->
@@ -1332,6 +1336,23 @@ var tbItems = [];
     $("t-parse").click();
   });
 })();
+function tbImagePreviewUrl(it, url){
+  return "/api/taobao/image?token=" + encodeURIComponent(it.token) + "&url=" + encodeURIComponent(url);
+}
+function openTbImagePreview(src){
+  $("tb-image-modal-img").src = src;
+  $("tb-image-modal").style.display = "flex";
+}
+function closeTbImagePreview(){
+  $("tb-image-modal").style.display = "none";
+  $("tb-image-modal-img").removeAttribute("src");
+}
+$("tb-image-modal-close").onclick = closeTbImagePreview;
+$("tb-image-modal").onclick = function(e){ if(e.target === this) closeTbImagePreview(); };
+document.addEventListener("keydown", function(e){
+  if(e.key === "Escape" && $("tb-image-modal").style.display !== "none") closeTbImagePreview();
+});
+
 function tbShorten(url){
   if(!url) return "-";
   var tail = url.split("/").pop().split("?")[0];
@@ -1339,16 +1360,49 @@ function tbShorten(url){
 }
 function tbImgOptions(it){
   var opts = [], seen = {};
-  var all = [];
-  if(it.image_url) all.push(it.image_url);
-  (it.gallery || []).forEach(function(u){ all.push(u); });
+  var selectedSku = (it.skus || []).find(function(s){ return s.text === it.selected_sku; });
+  // 有当前规格图片时，只显示该规格图片，避免把其它规格混入预览
+  var all = selectedSku && selectedSku.image_url
+    ? [selectedSku.image_url]
+    : (it.image_url ? [it.image_url] : (it.gallery || []));
   all.forEach(function(u){
     var k = u.split("?")[0];
-    if(seen[k]) return;
+    if(!u || seen[k]) return;
     seen[k] = 1;
     opts.push(u);
   });
   return opts;
+}
+function tbThumbHtml(it, imageUrls){
+  var thumbs = '<div class="t-thumb-strip" data-i="' + tbItems.indexOf(it) + '" style="display:flex;gap:4px;flex-wrap:wrap;margin-top:6px;max-width:190px;">';
+  imageUrls.slice(0, 12).forEach(function(u){
+    var src = tbImagePreviewUrl(it, u);
+    thumbs += '<img src="' + esc(src) + '" alt="' + esc(it.selected_sku || "商品图片") + '" loading="lazy" title="' + esc(it.selected_sku ? "规格：" + it.selected_sku + "，点击查看大图" : "点击查看大图") + '" ' +
+      'style="width:38px;height:38px;object-fit:cover;border:1px solid #d7dce5;border-radius:4px;cursor:zoom-in;background:#f5f6f8;" ' +
+      'onclick="openTbImagePreview(\'' + esc(src).replace(/'/g, "\\'") + '\')" ' +
+      'onerror="this.style.opacity=\".35\";">';
+  });
+  return thumbs + '</div>';
+}
+function updateTbSkuPreview(i){
+  var it = tbItems[i];
+  if(!it) return;
+  var skuEl = document.querySelector('.t-sku[data-i="' + i + '"]');
+  if(skuEl) it.selected_sku = skuEl.value;
+  var selectedSku = (it.skus || []).find(function(s){ return s.text === it.selected_sku; });
+  it.image_url = selectedSku && selectedSku.image_url ? selectedSku.image_url : ((it.gallery || [])[0] || it.image_url || null);
+  var imgOpts = tbImgOptions(it);
+  var imgEl = document.querySelector('.t-img[data-i="' + i + '"]');
+  if(imgEl){
+    imgEl.innerHTML = imgOpts.map(function(u, k){
+      return '<option value="' + esc(u) + '"' + (u === it.image_url ? ' selected' : '') + '>' + esc(k === 0 ? '当前规格图片' : tbShorten(u)) + '</option>';
+    }).join('');
+  }
+  var strip = document.querySelector('.t-thumb-strip[data-i="' + i + '"]');
+  if(strip){
+    var html = tbThumbHtml(it, imgOpts);
+    strip.outerHTML = html;
+  }
 }
 function renderTbRows(){
   var el = $("t-rows");
@@ -1385,6 +1439,7 @@ function renderTbRows(){
         esc(k === 0 ? "主图（选中规格）" : tbShorten(u)) + '</option>';
     });
     imgSel += '</select>';
+    var thumbs = tbThumbHtml(it, imgOpts);
     var shop = it.shop || "";
     var info = [];
     if(shop) info.push('店铺 ' + esc(shop.length > 12 ? shop.slice(0, 12) + "…" : shop));
@@ -1398,11 +1453,14 @@ function renderTbRows(){
       '<td><input type="number" class="t-qty mono" data-i="' + i + '" min="0" placeholder="0" style="width:62px;"></td>' +
       '<td><input class="t-barcode mono" data-i="' + i + '" placeholder="扫码/手输" title="填写并入库后绑定到该笔库存" style="width:126px;"></td>' +
       '<td>' + skuSel + '</td>' +
-      '<td>' + imgSel + '</td>' +
+      '<td>' + imgSel + thumbs + '</td>' +
       '<td style="white-space:nowrap;font-size:12px;color:var(--dim);">' + info.join(' · ') + '</td>' +
       '</tr>';
   });
   el.innerHTML = html + "</table></div>";
+  document.querySelectorAll(".t-sku").forEach(function(sel){
+    sel.addEventListener("change", function(){ updateTbSkuPreview(parseInt(this.dataset.i, 10)); });
+  });
 }
 $("t-parse").onclick = async function(){
   var files = $("t-file").files;

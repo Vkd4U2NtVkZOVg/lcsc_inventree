@@ -218,6 +218,36 @@ class TestTaobaoEndpoints:
         rv = client.post("/api/taobao/parse", data={})
         assert rv.status_code == 400
 
+    def test_gallery_image_preview(self, taobao_writer):
+        client, _ = taobao_writer
+        parsed = self._upload(client).get_json()["items"][0]
+        token = parsed["token"]
+        gallery_url = parsed["gallery"][0]
+        rv = client.get("/api/taobao/image", query_string={"token": token, "url": gallery_url})
+        assert rv.status_code == 200
+        assert rv.data == IMAGES[gallery_url.split("?")[0]]
+        assert rv.content_type in ("image/webp", "image/png", "image/jpeg")
+
+    def test_gallery_image_rejects_invalid_url_and_token(self, taobao_writer):
+        client, _ = taobao_writer
+        parsed = self._upload(client).get_json()["items"][0]
+        rv = client.get("/api/taobao/image", query_string={"token": "bad", "url": parsed["gallery"][0]})
+        assert rv.status_code == 400
+        rv = client.get("/api/taobao/image", query_string={"token": parsed["token"], "url": "https://evil.invalid/x.jpg"})
+        assert rv.status_code == 404
+
+    def test_gallery_image_preview_disk_fallback(self, taobao_writer):
+        client, _ = taobao_writer
+        parsed = self._upload(client).get_json()["items"][0]
+        token = parsed["token"]
+        gallery_url = parsed["gallery"][0]
+        import lcsc2inv.web as web_mod
+        with web_mod._taobao_cache_lock:
+            web_mod._taobao_cache.clear()
+        rv = client.get("/api/taobao/image", query_string={"token": token, "url": gallery_url})
+        assert rv.status_code == 200
+        assert rv.data == IMAGES[gallery_url.split("?")[0]]
+
     def test_import_creates_part(self, taobao_writer):
         client, writer = taobao_writer
         writer.upsert_custom_part.return_value = WriteResult(
