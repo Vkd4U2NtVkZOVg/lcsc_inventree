@@ -330,8 +330,9 @@
         <label class="box"><input type="checkbox" id="t-mfr" checked>按「品牌」创建厂商</label>
       </div>
       <div class="row">
-        <label class="box" style="margin-top:10px;">入库货位 ID（可空，行内填数量才入库）</label>
-        <input type="text" id="t-loc" placeholder="如 186" style="width:110px;margin-top:4px;">
+        <label class="box" style="margin-top:10px;">入库货位（可空，行内填数量才入库）</label>
+        <input type="text" id="t-loc" list="t-loc-list" placeholder="选择或输入货位 ID" style="width:180px;margin-top:4px;">
+        <datalist id="t-loc-list"></datalist>
       </div>
       <div id="t-rows"></div>
       <div class="btns">
@@ -2086,6 +2087,16 @@ function loadLocations() {
           opt.textContent = loc.path || loc.name || ("货位 #" + loc.pk);
           sel.appendChild(opt);
         });
+        var dl = $("t-loc-list");
+        if (dl) {
+          dl.innerHTML = "";
+          d.locations.forEach(function(loc) {
+            var option = document.createElement("option");
+            option.value = loc.pk;
+            option.label = loc.path || loc.name || ("货位 #" + loc.pk);
+            dl.appendChild(option);
+          });
+        }
         console.log("[QuickStock] 已加载", d.locations.length, "个货位");
         // 恢复上次选择
         var saved = localStorage.getItem("quick_last_location");
