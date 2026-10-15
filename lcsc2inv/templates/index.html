@@ -21,7 +21,7 @@
          color:#1f2328; }
   nav#tabs button:hover { background:#f0f2f6; }
   nav#tabs button.active { background:var(--brand); color:#fff; }
-  .wrap { flex:1; padding:24px 28px 60px; max-width:1600px; width:100%; }
+  .wrap { flex:1; padding:24px 28px 60px; max-width:none; width:100%; }
   /* 窄屏：侧边栏折叠为顶部横排 */
   @media (max-width:820px) {
     body { flex-direction:column; }
@@ -115,6 +115,13 @@
   .success-banner.error { background:#fee2e2; color:#7f1d1d; border-color:#dc2626; }
   .success-banner strong { display:block; font-size:64px; line-height:1.1; letter-spacing:.08em; }
   .success-banner span { display:block; margin-top:8px; font-size:18px; }
+  #panel-quick .card { padding:24px; margin-bottom:18px; }
+  #panel-quick .card h2 { font-size:20px; margin-bottom:14px; }
+  #panel-quick label { font-size:15px; }
+  #panel-quick input[type=text], #panel-quick input[type=number] { min-height:46px; font-size:16px; }
+  #panel-quick select { min-height:46px; font-size:16px; }
+  #panel-quick .btn { min-height:44px; font-size:16px; }
+  #panel-quick .btn.mini { min-height:42px; }
 </style>
 </head>
 <body>
@@ -361,9 +368,11 @@
         <div style="flex:1;min-width:200px;">
           <label>默认货位</label>
           <div style="display:flex;gap:6px;">
-            <select id="q-location" style="flex:1;padding:9px;border:1px solid #ccd1da;border-radius:6px;font-size:14px;">
-              <option value="">-- 选择货位 --</option>
-            </select>
+            <div style="flex:1;position:relative;">
+              <input type="text" id="q-location-search" placeholder="输入货位名称或编号搜索…" autocomplete="off" style="width:100%;padding:9px;border:1px solid #ccd1da;border-radius:6px;font-size:14px;">
+              <div id="q-location-results" style="display:none;position:absolute;z-index:20;left:0;right:0;top:100%;max-height:260px;overflow:auto;background:#fff;border:1px solid #ccd1da;border-radius:0 0 6px 6px;box-shadow:0 4px 10px rgba(0,0,0,.12);"></div>
+              <select id="q-location" style="display:none;"><option value="">-- 选择货位 --</option></select>
+            </div>
             <button class="btn mini" id="q-loc-scan" title="扫描货位条码" style="padding:9px 12px;">📷</button>
           </div>
           <div id="q-loc-scan-box" style="display:none;margin-top:6px;">
@@ -2103,6 +2112,8 @@ function loadLocations() {
         if (saved) {
           sel.value = saved;
           $("q-remember-loc").checked = true;
+          var savedLoc = qLocations.find(function(loc){ return String(loc.pk) === String(saved); });
+          if (savedLoc) $("q-location-search").value = savedLoc.path || savedLoc.name || ("货位 #" + savedLoc.pk);
         }
         updateCurrentLocationDisplay();
       } else {
@@ -2512,6 +2523,44 @@ $("q-code").addEventListener("keydown", function(e) {
     $("q-preview-card").style.display = "none";
   }
 });
+function renderLocationResults(query) {
+  var box = $("q-location-results");
+  var text = (query || "").trim().toLowerCase();
+  var matches = qLocations.filter(function(loc) {
+    var label = String(loc.path || loc.name || "").toLowerCase();
+    return !text || label.indexOf(text) >= 0 || String(loc.pk).indexOf(text) >= 0;
+  }).slice(0, 30);
+  box.innerHTML = "";
+  matches.forEach(function(loc) {
+    var row = document.createElement("div");
+    row.textContent = (loc.path || loc.name || ("货位 #" + loc.pk)) + "  (#" + loc.pk + ")";
+    row.style.cssText = "padding:9px 10px;cursor:pointer;border-bottom:1px solid #eef0f3;font-size:14px;";
+    row.onmouseover = function(){ this.style.background="#f0f4ff"; };
+    row.onmouseout = function(){ this.style.background=""; };
+    row.onclick = function(){ selectLocation(loc); };
+    box.appendChild(row);
+  });
+  box.style.display = matches.length ? "block" : "none";
+}
+
+function selectLocation(loc) {
+  var sel = $("q-location");
+  sel.value = String(loc.pk);
+  $("q-location-search").value = loc.path || loc.name || ("货位 #" + loc.pk);
+  $("q-location-results").style.display = "none";
+  if ($("q-remember-loc").checked) localStorage.setItem("quick_last_location", loc.pk);
+  updateCurrentLocationDisplay();
+}
+
+$("q-location-search").addEventListener("input", function(){ renderLocationResults(this.value); });
+$("q-location-search").addEventListener("focus", function(){ renderLocationResults(this.value); });
+$("q-location-search").addEventListener("keydown", function(e){
+  if(e.key === "Escape") $("q-location-results").style.display = "none";
+});
+document.addEventListener("click", function(e){
+  if(!e.target.closest || !e.target.closest("#q-location-search")) $("q-location-results").style.display = "none";
+});
+
 $("q-location").addEventListener("change", function() {
   if ($("q-remember-loc").checked) {
     localStorage.setItem("quick_last_location", this.value);
@@ -2551,6 +2600,8 @@ function scanLocationBarcode(barcode) {
           sel.value = pk;
         }
         updateCurrentLocationDisplay();
+        var scannedName = (d.object && (d.object.pathstring || d.object.name)) || ("货位 #" + pk);
+        $("q-location-search").value = scannedName;
         if ($("q-remember-loc").checked) {
           localStorage.setItem("quick_last_location", pk);
         }
