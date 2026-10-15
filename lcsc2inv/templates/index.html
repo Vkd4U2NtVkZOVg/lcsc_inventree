@@ -115,7 +115,9 @@
   .success-banner.error { background:#fee2e2; color:#7f1d1d; border-color:#dc2626; }
   .success-banner strong { display:block; font-size:64px; line-height:1.1; letter-spacing:.08em; }
   .success-banner span { display:block; margin-top:8px; font-size:18px; }
-  #panel-quick .card { padding:24px; margin-bottom:18px; }
+  #panel-quick .card { padding:24px; margin-bottom:18px; overflow:visible; }
+  #panel-quick #q-settings-card { position:relative; z-index:30; min-height:260px; }
+  #panel-quick #q-location-results { max-height:360px !important; }
   #panel-quick .card h2 { font-size:20px; margin-bottom:14px; }
   #panel-quick label { font-size:15px; }
   #panel-quick input[type=text], #panel-quick input[type=number] { min-height:46px; font-size:16px; }
@@ -362,7 +364,7 @@
       <p class="dim" style="margin:4px 0 0;">收货入库专用：输入 C-code / 扫码 → 自动匹配/创建 Part → 填数量 → 一键入库。支持连续录入和队列模式。</p>
     </div>
 
-    <div class="card">
+    <div class="card" id="q-settings-card">
       <h2>设置</h2>
       <div class="row">
         <div style="flex:1;min-width:200px;">
