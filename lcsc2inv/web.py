@@ -2250,11 +2250,26 @@ def api_stock_barcode_info(pk: int):
     )
 
 
-def _qr_png_response(data: str, download_name: str):
-    """把字符串绘制成二维码 PNG 并作为图片响应返回。"""
+def _qr_png_response(data: str, download_name: str, frame: bool = True):
+    """把字符串绘制成二维码 PNG 并作为图片响应返回。
+
+    frame=True 时在码外画一圈黑色外框（8px 白边 + 4px 粗框）：
+    打印贴标后裁切有基准线，粗框也在扫码静区之外，不影响识别。
+    """
     import qrcode  # 延迟导入：仅条码查看功能需要
 
-    img = qrcode.make(data, box_size=10, border=2)
+    img = qrcode.make(data, box_size=10, border=2).convert("RGB")
+    if frame:
+        from PIL import Image, ImageDraw
+
+        pad, weight = 8, 4
+        fw, fh = img.width + (pad + weight) * 2, img.height + (pad + weight) * 2
+        canvas = Image.new("RGB", (fw, fh), "white")
+        canvas.paste(img, (pad + weight, pad + weight))
+        ImageDraw.Draw(canvas).rectangle(
+            [0, 0, fw - 1, fh - 1], outline="black", width=weight
+        )
+        img = canvas
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     buf.seek(0)
@@ -2398,7 +2413,8 @@ def api_stock_qrcode_png(pk: int):
     """把库存项的 InvenTree 标准条码数据绘制成二维码 PNG（服务端生成）。"""
     try:
         return _qr_png_response(
-            json.dumps({"stockitem": pk}), f"stockitem-{pk}-qrcode.png"
+            json.dumps({"stockitem": pk}), f"stockitem-{pk}-qrcode.png",
+            frame=request.args.get("frame", "1") != "0",
         )
     except ImportError as exc:
         return jsonify({"ok": False, "error": f"缺少 qrcode 依赖: {exc}"}), 502
@@ -2413,7 +2429,10 @@ def api_qrcode_png():
     if len(data) > 2000:
         return jsonify({"ok": False, "error": "条码数据过长（>2000 字符）"}), 400
     try:
-        return _qr_png_response(data, "barcode-qrcode.png")
+        return _qr_png_response(
+            data, "barcode-qrcode.png",
+            frame=request.args.get("frame", "1") != "0",
+        )
     except ImportError as exc:
         return jsonify({"ok": False, "error": f"缺少 qrcode 依赖: {exc}"}), 502
 

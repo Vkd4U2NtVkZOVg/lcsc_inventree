@@ -553,7 +553,7 @@
           <div style="text-align:center;">
             <img id="bc-qr" alt="标准库存二维码" width="220" height="220"
                  style="border:1px solid var(--line); border-radius:8px; background:#fff;">
-            <p class="dim" style="font-size:12px; margin:6px 0 0;">InvenTree 标准库存码</p>
+            <p class="dim" style="font-size:12px; margin:6px 0 0;">InvenTree 标准库存码（已含外框，打印后按框裁切）</p>
             <div id="bc-custom-box" style="display:none; margin-top:16px;">
               <img id="bc-qr2" alt="绑定条码二维码" width="220" height="220"
                    style="border:1px solid var(--line); border-radius:8px; background:#fff;">
@@ -665,7 +665,10 @@
     </div>
     <div style="position:relative;flex:1;margin-top:10px;overflow:hidden;border-radius:10px;background:#000;min-height:0;">
       <video id="cam-video" autoplay playsinline muted style="position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;"></video>
-      <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(80%,520px);height:56%;border:2px solid rgba(99,130,255,.95);border-radius:12px;box-shadow:0 0 0 2000px rgba(0,0,0,.35);pointer-events:none;"></div>
+      <!-- 取景框：四角角标 + 外围压暗（扫码标准样式） -->
+      <div id="cam-finder" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(80%,520px);height:56%;box-shadow:0 0 0 2000px rgba(0,0,0,.35);pointer-events:none;transition:border-color .15s, box-shadow .15s;"><div class="corner-b" style="position:absolute;left:0;top:0;width:100%;height:100%;"></div></div>
+      <!-- 识别命中：画在二维码实际位置上的绿框 -->
+      <div id="cam-hitbox" style="display:none;position:absolute;border:3px solid #22c55e;border-radius:6px;box-shadow:0 0 12px rgba(34,197,94,.8);pointer-events:none;"></div>
     </div>
     <div style="color:#fff;margin-top:10px;">
       <div id="cam-status" style="color:#cbd5e1;font-size:14px;min-height:20px;">正在启动摄像头…</div>
@@ -682,6 +685,24 @@
   </div>
 </div>
 <canvas id="cam-canvas" style="display:none;"></canvas>
+<style>
+/* 扫码取景框四角角标 */
+#cam-finder::before, #cam-finder::after,
+#cam-finder .corner-b::before, #cam-finder .corner-b::after {
+  content:""; position:absolute; width:34px; height:34px;
+  border:4px solid rgba(99,130,255,.95);
+}
+#cam-finder::before { left:-2px; top:-2px; border-right:none; border-bottom:none; border-radius:8px 0 0 0; }
+#cam-finder::after  { right:-2px; top:-2px; border-left:none; border-bottom:none; border-radius:0 8px 0 0; }
+#cam-finder .corner-b::before { left:-2px; bottom:-2px; border-right:none; border-top:none; border-radius:0 0 0 8px; }
+#cam-finder .corner-b::after  { right:-2px; bottom:-2px; border-left:none; border-top:none; border-radius:0 0 8px 0; }
+/* 命中闪烁 */
+@keyframes cam-flash { 0% { box-shadow:0 0 0 2000px rgba(0,0,0,.35), 0 0 24px rgba(34,197,94,.95); }
+                       100% { box-shadow:0 0 0 2000px rgba(0,0,0,.35); } }
+#cam-finder.flash { animation:cam-flash .45s ease-out; }
+#cam-finder.flash::before, #cam-finder.flash::after,
+#cam-finder.flash .corner-b::before, #cam-finder.flash .corner-b::after { border-color:#22c55e; }
+</style>
 
 <script>
 function $(id){ return document.getElementById(id); }
@@ -3033,10 +3054,26 @@ function wxQrDecode(imageData) {
   }
 }
 
-async function camDecodeCanvas(canvas) {
+var camLastBox = null;  // 最近一次命中的码位置（整帧 canvas 像素坐标）→ 用于画绿框
+
+function boxFromPosition(pos) {
+  // zxing-wasm position: {topLeft/topRight/bottomLeft/bottomRight:{x,y}}
+  try {
+    var pts = [pos.topLeft, pos.topRight, pos.bottomLeft, pos.bottomRight];
+    var xs = pts.map(function(p) { return p.x; }), ys = pts.map(function(p) { return p.y; });
+    var x = Math.min.apply(null, xs), y = Math.min.apply(null, ys);
+    return { x: x, y: y, w: Math.max.apply(null, xs) - x, h: Math.max.apply(null, ys) - y };
+  } catch (e) { return null; }
+}
+
+async function camDecodeCanvas(canvas, fullFrame) {
   try {
     if (camDetector) {
       var codes = await camDetector.detect(canvas);
+      if (fullFrame && codes.length) {
+        var b = codes[0].boundingBox;
+        if (b) camLastBox = { x: b.x, y: b.y, w: b.width, h: b.height };
+      }
       return codes.map(function(c) { return c.rawValue; }).filter(Boolean);
     }
     if (window.ZXingWASM && window.ZXingWASM.readBarcodes && !camWasmBroken) {
@@ -3045,6 +3082,7 @@ async function camDecodeCanvas(canvas) {
         var results = await window.ZXingWASM.readBarcodes(imageData, {
           tryHarder: true, tryRotate: true, tryInvert: true, tryDownscale: true
         });
+        if (fullFrame && results.length) camLastBox = boxFromPosition(results[0].position);
         return results.map(function(r) { return String(r.text); }).filter(Boolean);
       } catch (e) {
         // 正常"无码"返回空数组；只有 wasm 加载/实例化失败才会抛错 → 降级
@@ -3107,11 +3145,41 @@ function camGrabFrame() {
 async function decodeCanvasRegions(canvas) {
   var fractions = [1, 0.6, 0.35];
   for (var i = 0; i < fractions.length; i++) {
-    var c = fractions[i] === 1 ? canvas : grabRegion(canvas, canvas.width, canvas.height, fractions[i]);
-    var texts = await camDecodeCanvas(c);
+    var isFull = fractions[i] === 1;
+    var c = isFull ? canvas : grabRegion(canvas, canvas.width, canvas.height, fractions[i]);
+    var texts = await camDecodeCanvas(c, isFull);
     if (texts.length) return texts;
   }
   return [];
+}
+
+// 命中反馈：取景框闪绿；有坐标时把绿框画在码的实际位置
+var camHitTimer = null;
+function camFlash(box) {
+  var finder = $("cam-finder");
+  if (!finder) return;
+  finder.classList.remove("flash");
+  void finder.offsetWidth;  // 重置动画
+  finder.classList.add("flash");
+  setTimeout(function() { finder.classList.remove("flash"); }, 450);
+
+  var hb = $("cam-hitbox");
+  var video = $("cam-video");
+  if (!hb || !video || !video.videoWidth) return;
+  if (box && box.w > 4 && box.h > 4) {
+    // canvas 像素坐标 → video 显示坐标（object-fit:contain 居中）
+    var cw = video.clientWidth, ch = video.clientHeight;
+    var scale = Math.min(cw / video.videoWidth, ch / video.videoHeight);
+    var offX = (cw - video.videoWidth * scale) / 2;
+    var offY = (ch - video.videoHeight * scale) / 2;
+    hb.style.left = (offX + box.x * scale) + "px";
+    hb.style.top = (offY + box.y * scale) + "px";
+    hb.style.width = Math.max(20, box.w * scale) + "px";
+    hb.style.height = Math.max(20, box.h * scale) + "px";
+    hb.style.display = "block";
+    if (camHitTimer) clearTimeout(camHitTimer);
+    camHitTimer = setTimeout(function() { hb.style.display = "none"; }, 900);
+  }
 }
 
 var camMissCount = 0;
@@ -3146,6 +3214,7 @@ async function camTick() {
         return;
       }
       camMissCount = 0;
+      camFlash(camLastBox);  // 命中反馈：闪绿 + 绿框锁定码的位置
       var payload = parseScanText(texts[0]);
       var now = Date.now();
       if (payload && camLastSeen && camLastSeen.code === payload.code &&
@@ -3291,6 +3360,9 @@ function camOpen(target) {
 
 function camClose() {
   camStage = "part";
+  if (camHitTimer) { clearTimeout(camHitTimer); camHitTimer = null; }
+  var hb0 = $("cam-hitbox");
+  if (hb0) hb0.style.display = "none";
   if (camTimer) { clearInterval(camTimer); camTimer = null; }
   if (camStream) {
     camStream.getTracks().forEach(function(t) { t.stop(); });
