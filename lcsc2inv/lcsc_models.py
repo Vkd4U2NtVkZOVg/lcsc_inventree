@@ -87,6 +87,9 @@ class LCSCPart(BaseModel):
     offer: Offer | None = None
     datasheet_url: str | None = None
     page_url: str | None = None  # LCSC 商品详情页 URL（由 client 拼出）
+    # 国内站 currentCatalog.catalogName（如 "贴片电容"）。品名缺类目词时
+    # 由 merge_cn_part 拼进 name/description（老器件 productName 常只有规格串）
+    cn_category_name: str | None = None
 
     @property
     def lcsc_code(self) -> str:

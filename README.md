@@ -38,7 +38,28 @@ LCSC 商品页 ─(requests 解析 ld+json)─► LCSCPart
 - **StockItem**：默认不建（只建器件），用 `--stock` 选建库存；建议由用户手工管理
 - **PartParameter**：InvenTree 1.2.6+ 与 SDK 不兼容时会跳过（不影响 Part/SupplierPart 写入）
 - **图片上传**：默认开启；重复运行跳过；`LCSC_UPLOAD_IMAGE=false` 关闭
-- **LCSC_BASE_URL**：默认国际版 (`www.lcsc.com`)；国内版需设置 `LCSC_BASE_URL=item.szlcsc.com`
+- **数据源**：Web 快速入库自动建 Part 默认走国内站 `item.szlcsc.com`（中文名/描述/参数，
+  分类与价格用国际站补齐；`LCSC_PREFER_CN=false` 回到国际站直连 `www.lcsc.com`）
+- **C-code → 国内数字 ID 映射**：优先用 `so.szlcsc.com` 搜索页第一个匹配项
+  （Playwright 渲染，需镜像内 Chromium），失败时从国际站页 `webData.productId` 抽取；
+  映射永久缓存于 `cn_id_map.json`
+
+## 快速入库 · 摄像头扫码
+
+「⚡ 快速入库」页的 **📷 扫码** 按钮调用手机/电脑摄像头（`getUserMedia`，需 HTTPS，
+本服务已自动启用）扫描立创物料标签：
+
+- 识别标签二维码里的 `pc:`（C-code）与 `qty:`（包装数量），自动填入代码与数量并预览
+- 解码引擎按顺序：原生 `BarcodeDetector` → **zxing-wasm**（zxing-cpp 的 WebAssembly 版，
+  与服务端兜底同引擎，随服务自带）→ **微信二维码引擎**（CNN 检测+超分，连续 2 秒未命中时
+  自动后台加载，对模糊/弯曲/反光 QR 更强；中心裁剪喂图）→ ZXing JS → 服务端 zxing-cpp
+- 「拍照识别 / 相册识别」应对近距离对焦困难：对当前帧或所选照片多档缩放重试
+- 「连续扫码」+「扫码后自动入库 / 加入队列」：选好货位可边扫边入库，或连续扫一批进队列后用「批量入库」一次提交（两者互斥，偏好自动记住）
+- 扫码枪同样可用：整段标签文本（含 `{pc:...}`）粘进代码框，后端自动归一化
+- 「📜 过程日志」卡片实时显示抓取/入库各步骤（`/api/activity/log`，同样输出到 docker 日志）
+- 默认货位支持 📷 摄像头扫货位条码（⌨ 切换扫码枪输入框）
+- 勾选「扫绑定库存码」为两段式扫码：先扫立创标签，再扫该物料的库存绑定码，
+  入库/队列时自动绑定（批量行携带 barcode，失败不影响入库结果）
 
 ## 字段映射
 

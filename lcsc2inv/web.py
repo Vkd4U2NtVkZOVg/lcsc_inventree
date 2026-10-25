@@ -35,7 +35,7 @@ import re
 import secrets
 import shutil
 import threading
-from collections import OrderedDict
+from collections import OrderedDict, deque
 
 import requests
 import time
@@ -62,6 +62,7 @@ from lcsc2inv.lcsc_client import (
 )
 from lcsc2inv.lcsc_models import LCSCPart
 from lcsc2inv.mapping import to_inventree_parameters, to_part_notes
+from lcsc2inv.qr_label import parse_scan_payload
 from lcsc2inv.quick_stock import (
     add_or_merge_stock,
     find_part,
@@ -166,6 +167,67 @@ def _get_settings() -> Settings:
 
 def _get_fetcher() -> Fetcher:
     return default_fetcher(_get_settings())
+
+
+def _normalize_scan_code(code: str) -> tuple[str, int | None]:
+    """把扫码文本（LCSC 标签 QR / C-code / 商品 URL）归一化为 (C-code, 数量)。
+
+    数量仅在标签 QR 携带 qty 时返回；非扫码文本原样返回（货位码等由各流程自行处理）。
+    """
+    payload = parse_scan_payload(code)
+    if payload is None:
+        return code, None
+    return payload.code, payload.quantity
+
+
+def _fetch_part_for_create(code: str) -> LCSCPart:
+    """自动创建 Part 时抓取 LCSC 数据：按 LCSC_PREFER_CN 决定是否走国内站。"""
+    fetcher = _get_fetcher()
+    if _get_settings().lcsc_prefer_cn:
+        return fetcher.fetch_cn_part(code)
+    return fetcher.fetch(code)
+
+
+# ---------------------------------------------------------------------------
+# 过程活动日志：环形缓冲 + 捕获 lcsc2inv.* 全部 INFO 日志，供前端轮询监控
+# ---------------------------------------------------------------------------
+
+_ACTIVITY_LOG: deque = deque(maxlen=300)
+_ACTIVITY_SEQ = itertools.count(1)
+_activity_lock = threading.Lock()
+
+
+class _ActivityLogHandler(logging.Handler):
+    """把 lcsc2inv.* 的日志记录捕获进环形缓冲（时间戳 + 序号）。"""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            with _activity_lock:
+                _ACTIVITY_LOG.append({
+                    "seq": next(_ACTIVITY_SEQ),
+                    "ts": datetime.now().strftime("%H:%M:%S"),
+                    "level": record.levelname.lower(),
+                    "message": msg,
+                })
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _setup_activity_log() -> None:
+    root = logging.getLogger("lcsc2inv")
+    root.setLevel(logging.INFO)
+    if not any(isinstance(h, _ActivityLogHandler) for h in root.handlers):
+        handler = _ActivityLogHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        root.addHandler(handler)
+        # 同步输出到 stderr，docker logs 也能监控
+        stream = logging.StreamHandler()
+        stream.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        root.addHandler(stream)
+
+
+_setup_activity_log()
 
 
 def _write_result_to_dict(result: WriteResult) -> dict:
@@ -1304,6 +1366,7 @@ def api_quick_lookup():
     code = (data.get("code") or "").strip()
     if not code:
         return jsonify({"ok": False, "error": "缺少 code 参数"}), 400
+    code, scan_quantity = _normalize_scan_code(code)
 
     location_pk = data.get("location_pk")
     if location_pk not in (None, ""):
@@ -1326,6 +1389,7 @@ def api_quick_lookup():
         result["stock_at_location"] = None
 
     result["lcsc_code"] = code
+    result["scan_quantity"] = scan_quantity
     return jsonify(result)
 
 
@@ -1348,6 +1412,8 @@ def api_quick_stock():
 
     if not code and not part_pk_input:
         return jsonify({"ok": False, "error": "缺少 code 或 part_pk 参数"}), 400
+    if code:
+        code, _scan_qty = _normalize_scan_code(code)
 
     quantity = data.get("quantity")
     if quantity in (None, ""):
@@ -1424,7 +1490,7 @@ def api_quick_stock():
 
             fetcher = _get_fetcher()
             try:
-                lcsc_part = fetcher.fetch(code)
+                lcsc_part = _fetch_part_for_create(code)
             except LcscFetchError as exc:
                 return jsonify({
                     "ok": False,
@@ -1530,12 +1596,22 @@ def api_quick_batch():
         except ValueError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 500
 
-        for row in rows:
+        total = len(rows)
+        logger.info("批量入库开始: %d 行，货位 %s", total, location_pk or "未指定")
+        for row_idx, row in enumerate(rows, start=1):
             if not isinstance(row, dict):
                 continue
             code = (row.get("code") or "").strip()
             quantity = row.get("quantity")
             notes = (row.get("notes") or "").strip() or None
+            row_barcode = (row.get("barcode") or "").strip() or None
+
+            # 扫码队列行：标签 QR 文本归一化为 C-code，qty 仅在未显式给数量时生效
+            if code:
+                norm_code, scan_qty = _normalize_scan_code(code)
+                if norm_code != code and scan_qty is not None and quantity in (None, ""):
+                    quantity = scan_qty
+                code = norm_code
 
             out = {"code": code, "ok": False}
             if not code or quantity in (None, ""):
@@ -1549,9 +1625,11 @@ def api_quick_batch():
                     raise ValueError
             except (TypeError, ValueError):
                 out["error"] = "quantity 必须为正数"
+                logger.info("批量入库 [%d/%d] %s: 失败（%s）", row_idx, total, code, out["error"])
                 results.append(out)
                 continue
 
+            logger.info("批量入库 [%d/%d] %s: 数量 %s，开始处理", row_idx, total, code, quantity)
             # 查找 Part
             result = find_part(api, code)
             part_pk = result["part_pk"]
@@ -1562,14 +1640,16 @@ def api_quick_batch():
                     parse_lcsc_code(code)
                 except ValueError:
                     out["error"] = f"未找到 Part，且 '{code}' 不是合法的 LCSC 代码"
+                    logger.info("批量入库 [%d/%d] %s: 失败（%s）", row_idx, total, code, out["error"])
                     results.append(out)
                     continue
 
                 fetcher = _get_fetcher()
                 try:
-                    lcsc_part = fetcher.fetch(code)
+                    lcsc_part = _fetch_part_for_create(code)
                 except LcscFetchError as exc:
                     out["error"] = f"抓取 LCSC 失败: {exc}"
+                    logger.info("批量入库 [%d/%d] %s: 失败（%s）", row_idx, total, code, out["error"])
                     results.append(out)
                     continue
 
@@ -1585,10 +1665,15 @@ def api_quick_batch():
                 )
                 if not write_result.ok():
                     out["error"] = f"创建 Part 失败: {'; '.join(write_result.errors)}"
+                    logger.info("批量入库 [%d/%d] %s: 失败（%s）", row_idx, total, code, out["error"])
                     results.append(out)
                     continue
                 part_pk = write_result.part_pk
                 created_part = True
+                logger.info(
+                    "批量入库 [%d/%d] %s: Part #%d 已创建（%s）",
+                    row_idx, total, code, part_pk, lcsc_part.description or "-",
+                )
 
             if not part_pk:
                 out["error"] = f"未找到 Part '{code}'"
@@ -1618,6 +1703,28 @@ def api_quick_batch():
             except Exception as exc:  # noqa: BLE001
                 out["error"] = f"入库失败: {exc}"
 
+            if out.get("ok"):
+                logger.info(
+                    "批量入库 [%d/%d] %s: 完成 +%s → 库存 %s%s",
+                    row_idx, total, code, out.get("quantity"),
+                    out.get("new_quantity"), "（合并）" if out.get("merged") else "（新库存条目）",
+                )
+                # 行携带绑定条码时，绑定到本次的库存项（失败不影响入库结果）
+                if row_barcode and out.get("stock_pk"):
+                    bound, bind_err, _bind_status = _bind_stock_barcode(out["stock_pk"], row_barcode)
+                    out["barcode_bound"] = bound
+                    if bound:
+                        logger.info(
+                            "批量入库 [%d/%d] %s: 绑定条码 %r → 库存 #%s",
+                            row_idx, total, code, row_barcode, out["stock_pk"],
+                        )
+                    else:
+                        logger.warning(
+                            "批量入库 [%d/%d] %s: 条码绑定失败 %r（%s）",
+                            row_idx, total, code, row_barcode, bind_err,
+                        )
+            else:
+                logger.info("批量入库 [%d/%d] %s: 失败（%s）", row_idx, total, code, out.get("error"))
             results.append(out)
 
     ok_count = sum(1 for r in results if r.get("ok"))
@@ -1950,6 +2057,54 @@ def api_barcode_scan():
     return jsonify({"ok": False, "error": "条码不是库存项或货位", "result": data}), 422
 
 
+@app.route("/api/barcode/decode-image", methods=["POST"])
+def api_barcode_decode_image():
+    """服务端解码标签图片（客户端 ZXing JS 识别不出时的兜底）。
+
+    multipart 字段 `image`：照片/相册图片。用 zxing-cpp 解码（比 ZXing JS
+    强得多），自动尝试多档缩放。返回所有识别到的码文本（前端自行解析 C-code）。
+    """
+    f = request.files.get("image")
+    if f is None:
+        return jsonify({"ok": False, "error": "缺少 image 文件"}), 400
+    data = f.read()
+    if not data:
+        return jsonify({"ok": False, "error": "图片内容为空"}), 400
+
+    try:
+        import io
+
+        import zxingcpp
+        from PIL import Image, ImageOps
+    except ImportError as exc:
+        return jsonify({"ok": False, "error": f"服务端解码组件缺失: {exc}"}), 500
+
+    try:
+        img = Image.open(io.BytesIO(data))
+        img = ImageOps.exif_transpose(img)  # 手机照片按 EXIF 摆正
+        if max(img.size) > 2400:
+            img.thumbnail((2400, 2400))
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": f"图片解析失败: {exc}"}), 400
+
+    # 整幅 + 多档缩放重试；zxing-cpp 对清晰照片基本一次命中，缩放兜底远距小码
+    texts: list[str] = []
+    w, h = img.size
+    for scale in (1.0, 0.6, 1.5, 0.35):
+        try:
+            candidate = img if scale == 1.0 else img.resize(
+                (max(1, int(w * scale)), max(1, int(h * scale)))
+            )
+            found = [str(r.text) for r in zxingcpp.read_barcodes(candidate)]
+        except Exception:  # noqa: BLE001
+            continue
+        if found:
+            texts = found
+            break
+
+    return jsonify({"ok": True, "count": len(texts), "texts": texts})
+
+
 @app.route("/api/stock/transfer", methods=["POST"])
 def api_stock_transfer():
     """把一笔库存的全部数量转移到目标货位。"""
@@ -2187,6 +2342,29 @@ def api_barcode_cache_restore():
     return jsonify({"ok": True, "restored": len(restored)})
 
 
+def _bind_stock_barcode(stock_pk: int, barcode: str) -> tuple[bool, str | None, int]:
+    """把自定义条码绑定到库存项（InvenTree POST /api/barcode/link/）。
+
+    绑定成功后同步写入本地条码缓存。返回 (是否成功, 错误信息, 建议状态码)。
+    """
+    barcode = (barcode or "").strip()
+    if not barcode:
+        return False, "缺少 barcode", 400
+    if len(barcode) > 2000:
+        return False, "条码内容过长（>2000 字符）", 400
+    try:
+        status_code, result = _inventree_request(
+            "POST", "/api/barcode/link/",
+            {"barcode": barcode, "stockitem": stock_pk},
+        )
+    except (ValueError, requests.RequestException) as exc:
+        return False, str(exc), 502
+    if status_code >= 400:
+        return False, str(result), status_code
+    barcode_lookup.cache_put(_get_settings(), stock_pk, barcode)
+    return True, None, 200
+
+
 @app.route("/api/barcode/bind", methods=["POST"])
 def api_barcode_bind():
     """把自定义条码绑定到库存项（InvenTree POST /api/barcode/link/）。
@@ -2201,21 +2379,10 @@ def api_barcode_bind():
     barcode = (data.get("barcode") or "").strip()
     if not barcode:
         return jsonify({"ok": False, "error": "缺少 barcode"}), 400
-    if len(barcode) > 2000:
-        return jsonify({"ok": False, "error": "条码内容过长（>2000 字符）"}), 400
 
-    try:
-        status_code, result = _inventree_request(
-            "POST", "/api/barcode/link/",
-            {"barcode": barcode, "stockitem": stock_pk},
-        )
-    except (ValueError, requests.RequestException) as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 502
-    if status_code >= 400:
-        return jsonify({"ok": False, "error": result}), status_code
-
-    # 绑定成功 → 同步本地缓存
-    barcode_lookup.cache_put(_get_settings(), stock_pk, barcode)
+    ok, error, status = _bind_stock_barcode(stock_pk, barcode)
+    if not ok:
+        return jsonify({"ok": False, "error": error}), status
     return jsonify(
         {
             "ok": True,
@@ -2269,6 +2436,15 @@ def api_history_clear():
         except OSError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 500
     return jsonify({"ok": True, "cleared": True})
+
+
+@app.route("/api/activity/log", methods=["GET"])
+def api_activity_log():
+    """查询过程活动日志（`since` 之后的条目，最多 100 条）。"""
+    since = request.args.get("since", 0, type=int)
+    with _activity_lock:
+        entries = [e for e in _ACTIVITY_LOG if e["seq"] > since][-100:]
+    return jsonify({"ok": True, "entries": entries, "last_seq": entries[-1]["seq"] if entries else since})
 
 
 @app.route("/api/doctor", methods=["GET"])

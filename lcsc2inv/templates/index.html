@@ -361,7 +361,7 @@
   <section class="panel" id="panel-quick">
     <div class="card">
       <h2>⚡ 快速入库</h2>
-      <p class="dim" style="margin:4px 0 0;">收货入库专用：输入 C-code / 扫码 → 自动匹配/创建 Part → 填数量 → 一键入库。支持连续录入和队列模式。</p>
+      <p class="dim" style="margin:4px 0 0;">收货入库专用：输入 C-code / 扫码 / 摄像头扫标签 → 自动匹配/创建 Part（国内站数据源）→ 填数量 → 一键入库。支持连续录入和队列模式。</p>
     </div>
 
     <div class="card" id="q-settings-card">
@@ -375,7 +375,8 @@
               <div id="q-location-results" style="display:none;position:absolute;z-index:20;left:0;right:0;top:100%;max-height:260px;overflow:auto;background:#fff;border:1px solid #ccd1da;border-radius:0 0 6px 6px;box-shadow:0 4px 10px rgba(0,0,0,.12);"></div>
               <select id="q-location" style="display:none;"><option value="">-- 选择货位 --</option></select>
             </div>
-            <button class="btn mini" id="q-loc-scan" title="扫描货位条码" style="padding:9px 12px;">📷</button>
+            <button class="btn mini" id="q-loc-scan" title="摄像头扫描货位条码" style="padding:9px 12px;">📷</button>
+            <button class="btn mini" id="q-loc-gun" title="扫码枪输入框" style="padding:9px 12px;">⌨</button>
           </div>
           <div id="q-loc-scan-box" style="display:none;margin-top:6px;">
             <input type="text" id="q-loc-barcode" placeholder="扫描货位条码…" autocomplete="off" style="width:100%;padding:8px;border:1px solid #4f6ef7;border-radius:6px;font-size:14px;">
@@ -400,6 +401,7 @@
       <label>器件代码 / 扫码</label>
       <div class="input-actions">
         <input type="text" id="q-code" placeholder="如 C28323，或扫描条码" autocomplete="off">
+        <button class="btn mini" id="q-cam" title="摄像头扫描标签二维码">📷 扫码</button>
         <button class="btn mini" id="q-paste" title="粘贴 (Ctrl+Shift+V)">📋 粘贴</button>
         <button class="btn mini" id="q-clear" style="background:#6b7280;" title="清空 (Esc)"> 清空</button>
       </div>
@@ -449,6 +451,12 @@
         <button class="btn" id="q-batch-run">⚡ 批量入库</button>
         <button class="btn mini" id="q-batch-clear" style="background:#6b7280;">清空队列</button>
       </div>
+    </div>
+
+    <div class="card">
+      <h2>📜 过程日志</h2>
+      <p class="dim" style="margin:4px 0 0;">入库/抓取过程的实时记录（每 1.5 秒刷新，同样输出到 docker 日志）。批量入库时可看到每行的处理进度。</p>
+      <div id="q-log" style="margin-top:8px;max-height:260px;overflow:auto;background:#0b1020;color:#c8d3f5;font-family:ui-monospace,Consolas,Menlo,monospace;font-size:12px;line-height:1.55;padding:10px;border-radius:8px;">暂无记录。</div>
     </div>
 
     <div class="card">
@@ -647,6 +655,33 @@
     </div>
   </section>
 </main>
+
+<!-- 摄像头扫码浮层（手机/电脑通用；需 HTTPS 或 localhost） -->
+<div id="cam-overlay" style="display:none;position:fixed;left:0;top:0;right:0;bottom:0;z-index:999;background:rgba(10,14,24,.92);">
+  <div style="display:flex;flex-direction:column;height:100%;max-width:720px;margin:0 auto;padding:12px;box-sizing:border-box;">
+    <div style="display:flex;align-items:center;justify-content:space-between;color:#fff;">
+      <b id="cam-title" style="font-size:16px;">📷 扫描立创标签二维码</b>
+      <button class="btn mini" id="cam-close" style="background:#6b7280;">✕ 关闭</button>
+    </div>
+    <div style="position:relative;flex:1;margin-top:10px;overflow:hidden;border-radius:10px;background:#000;min-height:0;">
+      <video id="cam-video" autoplay playsinline muted style="position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;"></video>
+      <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(80%,520px);height:56%;border:2px solid rgba(99,130,255,.95);border-radius:12px;box-shadow:0 0 0 2000px rgba(0,0,0,.35);pointer-events:none;"></div>
+    </div>
+    <div style="color:#fff;margin-top:10px;">
+      <div id="cam-status" style="color:#cbd5e1;font-size:14px;min-height:20px;">正在启动摄像头…</div>
+      <div class="row" style="margin-top:8px;align-items:center;flex-wrap:wrap;">
+        <button class="btn mini" id="cam-snap">📸 拍照识别</button>
+        <label class="btn mini" style="background:#6b7280;cursor:pointer;margin:0 0 0 6px;">🖼 相册识别<input type="file" id="cam-file" accept="image/*" style="display:none;"></label>
+        <label class="box" id="cam-continuous-box" style="color:#fff;margin-left:10px;"><input type="checkbox" id="cam-continuous"> 连续扫码</label>
+        <label class="box" id="cam-autostock-box" style="color:#fff;"><input type="checkbox" id="cam-autostock"> 扫码后自动入库</label>
+        <label class="box" id="cam-autoqueue-box" style="color:#fff;"><input type="checkbox" id="cam-autoqueue"> 扫码后加入队列</label>
+        <label class="box" id="cam-bind-box" style="color:#fff;"><input type="checkbox" id="cam-bind"> 扫绑定库存码</label>
+      </div>
+      <div style="color:#94a3b8;font-size:12px;margin-top:6px;">对准标签二维码即可自动识别 C-code 和数量；对焦困难时用「拍照识别」或「相册识别」。勾选「扫码后加入队列」连续扫一批后用「批量入库」一次提交；勾选「扫绑定库存码」则每个器件再扫一下它的库存绑定码，入库时自动绑定。</div>
+    </div>
+  </div>
+</div>
+<canvas id="cam-canvas" style="display:none;"></canvas>
 
 <script>
 function $(id){ return document.getElementById(id); }
@@ -2339,11 +2374,13 @@ function addToQueue() {
   }
 
   var notes = $("q-notes").value.trim();
-  qQueue.push({ code: code, quantity: qty, notes: notes });
+  var barcode = $("q-barcode").value.trim();
+  qQueue.push({ code: code, quantity: qty, notes: notes, barcode: barcode || null });
   renderQueue();
   // 清空输入，准备下一个
   $("q-code").value = "";
   $("q-notes").value = "";
+  $("q-barcode").value = "";
   $("q-preview-card").style.display = "none";
   $("q-code").focus();
   showQuickSuccess("已加入队列 (" + qQueue.length + ")");
@@ -2368,7 +2405,7 @@ function renderQueue() {
     var tr = document.createElement("tr");
     tr.innerHTML =
       '<td>' + (idx + 1) + '</td>' +
-      '<td class="mono">' + esc(item.code) + '</td>' +
+      '<td class="mono">' + esc(item.code) + (item.barcode ? ' <span title="入库后绑定：' + esc(item.barcode) + '">🏷</span>' : '') + '</td>' +
       '<td>' + esc(item.name || "-") + '</td>' +
       '<td>' + item.quantity + '</td>' +
       '<td><button class="btn mini" style="background:#dc2626;padding:4px 8px;font-size:12px;" data-queue-idx="' + idx + '">✕</button></td>';
@@ -2388,7 +2425,7 @@ function doBatchStock() {
 
   var body = {
     rows: qQueue.map(function(item) {
-      return { code: item.code, quantity: item.quantity, notes: item.notes };
+      return { code: item.code, quantity: item.quantity, notes: item.notes, barcode: item.barcode || null };
     }),
     merge: merge,
     create_if_missing: true
@@ -2638,7 +2675,7 @@ function updateCurrentLocationDisplay() {
   }
 }
 
-$("q-loc-scan").addEventListener("click", function() {
+$("q-loc-gun").addEventListener("click", function() {
   var box = $("q-loc-scan-box");
   if (box.style.display === "none") {
     box.style.display = "block";
@@ -2824,6 +2861,637 @@ $("q-queue-body").addEventListener("click", function(e) {
     renderQueue();
   }
 });
+// ===== 摄像头扫码（快速入库）=====
+// 优先用浏览器原生 BarcodeDetector（Chrome/Edge/Android），
+// 不支持时懒加载 ZXing JS（iOS Safari 等），两者都从 video 帧解码。
+var camStream = null;
+var camTimer = null;
+var camDetector = null;      // BarcodeDetector 实例或 null
+var zxingReader = null;      // ZXing.BrowserMultiFormatReader 兜底
+var camBusy = false;         // 上一帧还在解码时跳过本轮
+var camTarget = "code";      // "code"=器件标签（默认） / "location"=货位条码
+var camStage = "part";       // "part"=等立创标签 / "bound"=等库存绑定码（勾选扫绑定码时）
+
+function camStatus(msg) { $("cam-status").textContent = msg; }
+
+// 按目标切换浮层文案与选项可见性（货位模式下连续/入库/队列选项不适用）
+function camApplyTarget() {
+  var isLoc = camTarget === "location";
+  $("cam-title").textContent = isLoc ? "📷 扫描货位条码" : "📷 扫描立创标签二维码";
+  ["cam-continuous-box", "cam-autostock-box", "cam-autoqueue-box", "cam-bind-box"].forEach(function(id) {
+    $(id).style.display = isLoc ? "none" : "";
+  });
+}
+
+// 扫码引擎加载源：第一个是随服务自带的同源静态文件（不依赖外网），后面是公共 CDN 兜底
+var ZXING_SOURCES = [
+  "/static/zxing.min.js",
+  "https://registry.npmmirror.com/@zxing/library/0.21.3/files/umd/index.min.js",
+  "https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js",
+  "https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"
+];
+
+function loadZxing() {
+  if (window.ZXing) return Promise.resolve();
+  var i = 0;
+  function tryNext() {
+    if (i >= ZXING_SOURCES.length) {
+      return Promise.reject(new Error("所有源均失败"));
+    }
+    var src = ZXING_SOURCES[i++];
+    camStatus("正在加载扫码引擎… (" + i + "/" + ZXING_SOURCES.length + ")");
+    return new Promise(function(resolve, reject) {
+      var s = document.createElement("script");
+      var done = false;
+      var timer = setTimeout(function() {
+        if (done) return;
+        done = true;
+        s.remove();
+        reject(new Error("加载超时"));
+      }, 10000);
+      s.onload = function() {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        window.ZXing ? resolve() : reject(new Error("脚本加载但 ZXing 未定义"));
+      };
+      s.onerror = function() {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        s.remove();
+        reject(new Error("加载失败"));
+      };
+      s.src = src;
+      document.head.appendChild(s);
+    }).catch(function() {
+      return tryNext();
+    });
+  }
+  return tryNext();
+}
+
+var zxingHints = null;
+
+function ensureZxingReader() {
+  if (zxingReader) return zxingReader;
+  // 低层 API：BrowserMultiFormatReader 在本构建里没有 decodeFromCanvas，
+  // 用 MultiFormatReader + HTMLCanvasElementLuminanceSource 手动构建解码管线
+  zxingHints = new Map();
+  zxingHints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+  zxingReader = new ZXing.MultiFormatReader();
+  zxingReader.setHints(zxingHints);
+  return zxingReader;
+}
+
+// zxing-wasm 引擎（zxing-cpp 的 WebAssembly 版，识别力远强于 ZXing JS）
+function loadZxingWasm() {
+  if (window.ZXingWASM && window.ZXingWASM.readBarcodes) return Promise.resolve();
+  if (!window.zxingWasmReady) {
+    window.zxingWasmReady = new Promise(function(resolve, reject) {
+      var s = document.createElement("script");
+      var done = false;
+      var timer = setTimeout(function() {
+        if (done) return;
+        done = true;
+        reject(new Error("wasm 引擎加载超时"));
+      }, 15000);
+      s.src = "/static/zxing-wasm/zxing-wasm-reader.js";
+      s.onload = function() {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (!(window.ZXingWASM && window.ZXingWASM.readBarcodes)) {
+          reject(new Error("wasm 全局未定义"));
+          return;
+        }
+        try {
+          // IIFE 构建没有 script 路径探测，必须显式指定 wasm 所在目录
+          window.ZXingWASM.setZXingModuleOverrides({
+            locateFile: function(path) { return "/static/zxing-wasm/" + path; }
+          });
+        } catch (e) { /* 旧版本无此接口时由降级逻辑接管 */ }
+        resolve();
+      };
+      s.onerror = function() {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        reject(new Error("wasm 脚本加载失败"));
+      };
+      document.head.appendChild(s);
+    });
+  }
+  return window.zxingWasmReady;
+}
+
+var camWasmBroken = false;   // wasm 实例化失败时置位，自动降级 ZXing JS
+var wxQr = null;             // 微信引擎实例（OpencvQr）
+var wxQrLoading = null;      // 加载中的 Promise（防重复）
+
+// 微信二维码引擎（CNN 检测+超分，强项：占比大但模糊/弯曲的 QR）。
+// 5.9MB（内嵌 wasm + 模型），按需后台加载：zxing-wasm 连续解不出时才启用。
+function loadWxQr() {
+  if (wxQr) return Promise.resolve(wxQr);
+  if (wxQrLoading) return wxQrLoading;
+  wxQrLoading = new Promise(function(resolve, reject) {
+    var s = document.createElement("script");
+    var timer = setTimeout(function() { reject(new Error("微信引擎加载超时")); }, 30000);
+    s.src = "/static/wxqr/OpencvQr.js";
+    s.onload = function() {
+      if (!window.OpencvQr) { clearTimeout(timer); reject(new Error("OpencvQr 全局未定义")); return; }
+      var inst = new window.OpencvQr({
+        dw: "/static/wxqr/detect.caffemodel",
+        sw: "/static/wxqr/sr.caffemodel",
+      });
+      inst.ready.then(function() {
+        clearTimeout(timer);
+        wxQr = inst;
+        resolve(inst);
+      }).catch(function(e) { clearTimeout(timer); reject(e); });
+    };
+    s.onerror = function() { clearTimeout(timer); reject(new Error("微信引擎脚本加载失败")); };
+    document.head.appendChild(s);
+  }).catch(function(e) {
+    wxQrLoading = null;  // 允许之后重试
+    throw e;
+  });
+  return wxQrLoading;
+}
+
+// 微信引擎解码（每次用完释放 wasm 堆，防止内存泄漏）；失败/无码返回 []
+function wxQrDecode(imageData) {
+  if (!wxQr) return Promise.resolve([]);
+  try {
+    wxQr.load(imageData);
+    var infos = wxQr.getInfos().filter(Boolean);
+    try { wxQr.clear(); } catch (e) {}
+    return Promise.resolve(infos);
+  } catch (e) {
+    try { wxQr.clear(); } catch (e2) {}
+    return Promise.resolve([]);
+  }
+}
+
+async function camDecodeCanvas(canvas) {
+  try {
+    if (camDetector) {
+      var codes = await camDetector.detect(canvas);
+      return codes.map(function(c) { return c.rawValue; }).filter(Boolean);
+    }
+    if (window.ZXingWASM && window.ZXingWASM.readBarcodes && !camWasmBroken) {
+      try {
+        var imageData = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
+        var results = await window.ZXingWASM.readBarcodes(imageData, {
+          tryHarder: true, tryRotate: true, tryInvert: true, tryDownscale: true
+        });
+        return results.map(function(r) { return String(r.text); }).filter(Boolean);
+      } catch (e) {
+        // 正常"无码"返回空数组；只有 wasm 加载/实例化失败才会抛错 → 降级
+        camWasmBroken = true;
+        camStatus("⚠ wasm 引擎故障，已降级 ZXing JS");
+      }
+    }
+    if (window.ZXing) {
+      var reader = ensureZxingReader();
+      try {
+        var source = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
+        var bitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(source));
+        var r = reader.decode(bitmap);
+        return r ? [String(r.getText())] : [];
+      } catch (e) { return []; }  // NotFoundException：本帧无码
+    }
+  } catch (e) { /* 单帧失败忽略 */ }
+  return [];
+}
+
+// 中心裁剪 + 降采样后喂微信引擎（CNN 输入 384²，大画面小 QR 会丢；
+// 裁到取景框区域并压到 ≤640px，正好落在它的强区）
+function wxQrDecodeCanvas(canvas) {
+  var fraction = 0.7;
+  var w = Math.max(1, Math.round(canvas.width * fraction));
+  var h = Math.max(1, Math.round(canvas.height * fraction));
+  var sx = Math.round((canvas.width - w) / 2), sy = Math.round((canvas.height - h) / 2);
+  var scale = Math.min(1, 640 / Math.max(w, h));
+  var c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(w * scale));
+  c.height = Math.max(1, Math.round(h * scale));
+  c.getContext("2d").drawImage(canvas, sx, sy, w, h, 0, 0, c.width, c.height);
+  return wxQrDecode(c.getContext("2d").getImageData(0, 0, c.width, c.height));
+}
+
+// 中心裁剪：fraction=0.6 取画面中心 60%。远拍时 QR 只占画面一小块，
+// 裁剪等于放大，命中率远高于整幅解码
+function grabRegion(source, sw, sh, fraction) {
+  var canvas = document.createElement("canvas");
+  var w = Math.max(1, Math.round(sw * fraction));
+  var h = Math.max(1, Math.round(sh * fraction));
+  var sx = Math.round((sw - w) / 2), sy = Math.round((sh - h) / 2);
+  canvas.width = w; canvas.height = h;
+  canvas.getContext("2d").drawImage(source, sx, sy, w, h, 0, 0, w, h);
+  return canvas;
+}
+
+// 把当前 video 帧取到复用缓冲（fraction=1 整幅）
+function camGrabFrame() {
+  var video = $("cam-video");
+  if (!video || !video.videoWidth) return null;
+  var canvas = $("cam-canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext("2d").drawImage(video, 0, 0);
+  return canvas;
+}
+
+// 静态图像（照片/相册/视频帧）按 整幅 → 中心裁剪 逐级尝试解码
+async function decodeCanvasRegions(canvas) {
+  var fractions = [1, 0.6, 0.35];
+  for (var i = 0; i < fractions.length; i++) {
+    var c = fractions[i] === 1 ? canvas : grabRegion(canvas, canvas.width, canvas.height, fractions[i]);
+    var texts = await camDecodeCanvas(c);
+    if (texts.length) return texts;
+  }
+  return [];
+}
+
+var camMissCount = 0;
+// 同码防重：同一编码在画面里停留期间只算一次；
+// 移开 CAM_DUP_WINDOW 毫秒（画面中识别不到它）后才允许再次计入
+var CAM_DUP_WINDOW = 1500;
+var camLastSeen = null;      // {code, at} 最近一次已处理的编码及时间
+var camLastRaw = null;       // {text, at} 最近一次处理的非器件编码文本（去重用）
+var camDupNotified = false;  // 避免每帧重复刷"已跳过"提示
+
+async function camTick() {
+  if (camBusy) return;
+  camBusy = true;
+  try {
+    var canvas = camGrabFrame();
+    if (canvas) {
+      var texts = await decodeCanvasRegions(canvas);
+      if (!texts.length && wxQr) {
+        texts = await wxQrDecodeCanvas(canvas);  // 微信引擎兜底（中心裁剪）
+      }
+      if (!texts.length) {
+        camMissCount++;
+        // 连续 2 秒未命中：后台加载微信引擎（5.9MB，局域网秒级）
+        if (camMissCount >= 6 && !wxQr && !wxQrLoading) {
+          loadWxQr().then(function() {
+            camStatus("已启用微信扫码引擎（增强模糊/反光识别）");
+          }).catch(function() {});
+        }
+        if (camMissCount === 14) {  // 约 4 秒未识别，提示改善拍摄
+          camStatus("仍未识别：请再靠近一点、正对二维码，或点「拍照识别」");
+        }
+        return;
+      }
+      camMissCount = 0;
+      var payload = parseScanText(texts[0]);
+      var now = Date.now();
+      if (payload && camLastSeen && camLastSeen.code === payload.code &&
+          now - camLastSeen.at < CAM_DUP_WINDOW) {
+        // 标签还留在画面中：跳过，不重复入队/入库
+        camLastSeen.at = now;
+        if (!camDupNotified) {
+          camDupNotified = true;
+          camStatus("⏸ " + payload.code + " 仍在画面中，已跳过；移开标签后再扫下一件");
+        }
+        return;
+      }
+      if (payload) {
+        camDupNotified = false;
+        camLastSeen = { code: payload.code, at: now };
+      } else if (camLastRaw && camLastRaw.text === texts[0] &&
+                 now - camLastRaw.at < 2500) {
+        // 非器件编码（库存绑定码等）在画面中停留：2.5 秒内只处理一次
+        camLastRaw.at = now;
+        return;
+      }
+      camLastRaw = { text: texts[0], at: now };
+      camHandleScan(texts[0]);
+    }
+  } finally { camBusy = false; }
+}
+
+// 服务端 zxing-cpp 兜底解码（本地引擎连续失败时）
+function serverDecodeBlob(blob) {
+  var fd = new FormData();
+  fd.append("image", blob, "frame.jpg");
+  return fetch("/api/barcode/decode-image", { method: "POST", body: fd })
+    .then(function(res) { return res.json(); })
+    .then(function(d) {
+      return (d && d.ok && d.texts && d.texts.length) ? d.texts : null;
+    })
+    .catch(function() { return null; });
+}
+
+// 解析扫码文本：LCSC 标签 QR / 裸 C-code / 国际站商品 URL → {code, qty}
+function parseScanText(text) {
+  if (!text) return null;
+  var t = String(text).trim();
+  var m;
+  if (t.charAt(0) === "{") {
+    var pc = t.match(/pc:\s*([^,}]+)/);
+    if (!pc) return null;
+    var code = pc[1].trim().toUpperCase();
+    if (!/^C\d{4,9}$/.test(code)) return null;
+    var qty = null;
+    var qm = t.match(/qty:\s*(\d+)/);
+    if (qm) qty = parseInt(qm[1], 10);
+    return { code: code, qty: qty > 0 ? qty : null };
+  }
+  m = t.match(/product-detail\/C(\d+)\.html/i);
+  if (m) return { code: "C" + m[1], qty: null };
+  m = t.replace(/[\s._-]+/g, "").match(/^(C\d{4,9})$/i);
+  if (m) return { code: m[1].toUpperCase(), qty: null };
+  return null;
+}
+
+async function camHandleScan(text) {
+  if (camTarget === "location") {
+    if (navigator.vibrate) navigator.vibrate(80);
+    playSuccessTone();
+    camStatus("✅ 已识别条码，正在定位货位…");
+    camClose();
+    scanLocationBarcode(String(text || "").trim());
+    return;
+  }
+  var payload = parseScanText(text);
+
+  // 第二段：扫库存绑定码（非 LCSC 编码格式）
+  if (camStage === "bound" && !payload) {
+    $("q-barcode").value = String(text || "").trim();
+    camStage = "part";
+    if ($("cam-autoqueue").checked) {
+      var beforeB = qQueue.length;
+      addToQueue();
+      camStatus(qQueue.length > beforeB
+        ? "✅ 绑定码已填入，已加入队列（共 " + qQueue.length + " 件），继续扫下一件"
+        : "❌ 加入队列失败：请检查数量");
+    } else if ($("cam-autostock").checked && $("q-location").value) {
+      camStatus("✅ 绑定码已填入，正在入库…");
+      doQuickStock();
+    } else if ($("cam-autostock").checked) {
+      camStatus("⚠ 绑定码已填入，但未选货位；请先在上方设置货位");
+    } else {
+      camStatus("✅ 绑定码已填入：" + $("q-barcode").value.slice(0, 40) + "，按 Enter 入库");
+      if (!$("cam-continuous").checked) camClose();
+    }
+    return;
+  }
+
+  if (!payload) {
+    camStatus("❌ 未识别为 LCSC 编码：" + String(text).slice(0, 60));
+    return;
+  }
+  if (navigator.vibrate) navigator.vibrate(80);
+  playSuccessTone();
+  camStatus("✅ 识别到 " + payload.code + (payload.qty ? "（数量 " + payload.qty + "）" : ""));
+  qSelectedPartPk = null;  // 扫码目标以本次识别为准，清除搜索残留选中
+  $("q-code").value = payload.code;
+  if (payload.qty) $("q-qty").value = payload.qty;
+  if ($("cam-bind").checked) {
+    // 两段式：本段只识别器件，下一段扫绑定库存码；绑完再按入库/队列选项执行
+    camStage = "bound";
+    $("q-barcode").value = "";
+    lookupPart(payload.code);
+    camStatus("✅ " + payload.code + (payload.qty ? "（数量 " + payload.qty + "）" : "")
+      + "，请扫描该物料的库存绑定码");
+    return;
+  }
+  if ($("cam-autoqueue").checked) {
+    // 连续扫码进队列：浮层不关，扫一件加一件，最后用「批量入库」一次提交
+    var before = qQueue.length;
+    addToQueue();
+    if (qQueue.length > before) {
+      camStatus("✅ " + payload.code + " 已加入队列（共 " + qQueue.length + " 件），继续扫下一件");
+    } else {
+      camStatus("❌ " + payload.code + " 加入队列失败：请检查数量后重试");
+    }
+  } else {
+    lookupPart(payload.code);
+    $("q-qty").focus();
+    if ($("cam-autostock").checked && $("q-location").value) {
+      doQuickStock();
+    } else if ($("cam-autostock").checked) {
+      camStatus("⚠ 已选自动入库，但未选货位；请先在上方设置货位");
+    }
+    if (!$("cam-continuous").checked) camClose();
+  }
+}
+
+function camOpen(target) {
+  camTarget = target || "code";
+  camStage = "part";
+  camApplyTarget();
+  $("cam-overlay").style.display = "block";
+  camStatus("正在启动摄像头…");
+  camStart();
+}
+
+function camClose() {
+  camStage = "part";
+  if (camTimer) { clearInterval(camTimer); camTimer = null; }
+  if (camStream) {
+    camStream.getTracks().forEach(function(t) { t.stop(); });
+    camStream = null;
+  }
+  var video = $("cam-video");
+  if (video) video.srcObject = null;
+  camBusy = false;
+  $("cam-overlay").style.display = "none";
+}
+
+async function camStart() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    camStatus("❌ 当前浏览器不支持摄像头。手机需 HTTPS 访问（本服务已启用），或改用「相册识别」。");
+    return;
+  }
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+  } catch (err) {
+    camStatus("❌ 摄像头启动失败：" + err.message + "（请检查浏览器权限，或用「相册识别」）");
+    return;
+  }
+  var video = $("cam-video");
+  video.srcObject = camStream;
+  try { await video.play(); } catch (e) { /* autoplay 约束下 muted+playsinline 可播 */ }
+  if (window.BarcodeDetector) {
+    try {
+      camDetector = new BarcodeDetector({ formats: ["qr_code", "code_128"] });
+      var supported = await camDetector.getSupportedFormats();
+      if (supported.indexOf("qr_code") < 0) camDetector = null;
+    } catch (e) { camDetector = null; }
+  }
+  if (!camDetector) {
+    var wasmLoaded = false;
+    try {
+      camStatus("正在加载扫码引擎（wasm）…");
+      await loadZxingWasm();
+      // 预热探测：8x8 空白帧能正常解码说明 wasm 实例化成功
+      try {
+        var warm = document.createElement("canvas");
+        warm.width = 8; warm.height = 8;
+        await window.ZXingWASM.readBarcodes(warm.getContext("2d").getImageData(0, 0, 8, 8), {});
+        wasmLoaded = true;
+      } catch (eWarm) {
+        camWasmBroken = true;
+        camStatus("⚠ wasm 引擎不可用，改用 ZXing JS");
+      }
+    } catch (eWasm) { /* 回退 ZXing JS */ }
+    if (!wasmLoaded && !camWasmBroken) {
+      try {
+        camStatus("正在加载扫码引擎（ZXing）…");
+        await loadZxing();
+      } catch (e) {
+        camStatus("❌ 扫码引擎加载失败。请关闭浮层刷新页面后重试。");
+        return;
+      }
+    }
+  }
+  var engineName = camDetector ? "原生"
+    : (window.ZXingWASM && window.ZXingWASM.readBarcodes && !camWasmBroken ? "wasm" : "ZXing");
+  camStatus("请将标签二维码对准取景框（" + engineName + " 引擎）");
+  if (camTimer) clearInterval(camTimer);
+  camTimer = setInterval(function() { camTick().catch(function(){}); }, 300);
+}
+
+// 拍照识别：中心裁剪逐级尝试 → 服务端 zxing-cpp 兜底
+$("cam-snap").addEventListener("click", async function() {
+  camStatus("正在识别当前画面…");
+  var found = null;
+  var canvas = camGrabFrame();
+  if (canvas) {
+    var texts = await decodeCanvasRegions(canvas);
+    if (texts.length) found = texts[0];
+    if (!found) {
+      camStatus("尝试微信引擎识别…");
+      try { await loadWxQr(); } catch (e) {}
+      if (wxQr) {
+        var full = await wxQrDecode(canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height));
+        if (full.length) found = full[0];
+        if (!found) {
+          var wxc = await wxQrDecodeCanvas(canvas);
+          if (wxc.length) found = wxc[0];
+        }
+      }
+    }
+    if (!found) {
+      camStatus("本地引擎未识别，尝试服务器解码…");
+      var blob = await new Promise(function(resolve) {
+        canvas.toBlob(resolve, "image/jpeg", 0.9);
+      });
+      if (blob) {
+        var serverTexts = await serverDecodeBlob(blob);
+        if (serverTexts) found = serverTexts[0];
+      }
+    }
+  }
+  if (found) camHandleScan(found);
+  else camStatus("未识别到二维码：请靠近对焦后重试，或换「相册识别」");
+});
+
+// 相册识别：从手机相册/本地选一张标签照片
+$("cam-file").addEventListener("change", async function() {
+  var file = this.files && this.files[0];
+  this.value = "";
+  if (!file) return;
+  camStatus("正在识别图片…");
+  var img = new Image();
+  var url = URL.createObjectURL(file);
+  try {
+    await new Promise(function(resolve, reject) {
+      img.onload = resolve;
+      img.onerror = function() { reject(new Error("图片读取失败")); };
+      img.src = url;
+    });
+    var maxDim = 1600;
+    var scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+    var canvas = document.createElement("canvas");
+    canvas.width = Math.round(img.naturalWidth * scale);
+    canvas.height = Math.round(img.naturalHeight * scale);
+    canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+    var found = null;
+    var texts = await decodeCanvasRegions(canvas);
+    if (texts.length) found = texts[0];
+    if (!found) {
+      camStatus("尝试微信引擎识别…");
+      try { await loadWxQr(); } catch (e) {}
+      if (wxQr) {
+        var fullA = await wxQrDecode(canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height));
+        if (fullA.length) found = fullA[0];
+        if (!found) {
+          var wxcA = await wxQrDecodeCanvas(canvas);
+          if (wxcA.length) found = wxcA[0];
+        }
+      }
+    }
+    if (!found) {
+      camStatus("本地引擎未识别，尝试服务器解码…");
+      var serverTexts = await serverDecodeBlob(file);
+      if (serverTexts) found = serverTexts[0];
+    }
+    if (found) camHandleScan(found);
+    else camStatus("图片中未识别到二维码，请换一张更清晰的照片");
+  } catch (err) {
+    camStatus("❌ " + err.message);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+});
+
+$("q-cam").addEventListener("click", function() { camOpen("code"); });
+$("q-loc-scan").addEventListener("click", function() { camOpen("location"); });
+$("cam-close").addEventListener("click", camClose);
+// 记住偏好
+[["cam-continuous", "cam_continuous"], ["cam-autostock", "cam_autostock"], ["cam-autoqueue", "cam_autoqueue"], ["cam-bind", "cam_bind"]].forEach(function(pair) {
+  var el = $(pair[0]), key = pair[1];
+  if (localStorage.getItem(key) === "1") el.checked = true;
+  el.addEventListener("change", function() {
+    localStorage.setItem(key, el.checked ? "1" : "0");
+  });
+});
+// 入库 / 入队互斥：勾一个自动取消另一个
+$("cam-autostock").addEventListener("change", function() {
+  if (this.checked) {
+    $("cam-autoqueue").checked = false;
+    localStorage.setItem("cam_autoqueue", "0");
+  }
+});
+$("cam-autoqueue").addEventListener("change", function() {
+  if (this.checked) {
+    $("cam-autostock").checked = false;
+    localStorage.setItem("cam_autostock", "0");
+  }
+});
+
+// ===== 过程日志轮询（快速入库页可见时每 1.5 秒拉一次增量）=====
+var qLogSeq = 0;
+setInterval(function() {
+  if (!$("panel-quick").classList.contains("active")) return;
+  fetch("/api/activity/log?since=" + qLogSeq)
+    .then(function(res) { return res.json(); })
+    .then(function(d) {
+      if (!d.ok || !d.entries || !d.entries.length) return;
+      var box = $("q-log");
+      if (box.textContent === "暂无记录。") box.textContent = "";
+      d.entries.forEach(function(e) {
+        var line = document.createElement("div");
+        line.style.color = e.level === "error" ? "#f87171"
+          : (e.level === "warning" ? "#f59e0b" : "#c8d3f5");
+        line.textContent = e.ts + "  " + e.message;
+        box.appendChild(line);
+      });
+      qLogSeq = d.entries[d.entries.length - 1].seq;
+      while (box.children.length > 300) box.removeChild(box.firstChild);
+      box.scrollTop = box.scrollHeight;
+    })
+    .catch(function() {});
+}, 1500);
+
 // 全局快捷键
 document.addEventListener("keydown", function(e) {
   if (e.ctrlKey && e.shiftKey && e.key === "V") {
@@ -2833,7 +3501,11 @@ document.addEventListener("keydown", function(e) {
       $("q-paste").click();
     }
   } else if (e.key === "Escape") {
-    // Esc 清空（当快速入库面板激活时）
+    // Esc：先关扫码浮层，再清空快速入库输入
+    if ($("cam-overlay").style.display === "block") {
+      camClose();
+      return;
+    }
     if ($("panel-quick").classList.contains("active") && document.activeElement === $("q-code")) {
       $("q-clear").click();
     }

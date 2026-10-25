@@ -55,6 +55,7 @@ web = [
     "playwright==1.47.0",
     "docker>=7.0",  # 通过 docker.sock 进入 InvenTree 容器执行数据库备份
     "qrcode[pil]>=7.4",  # 条码查看页：服务端绘制库存二维码 PNG
+    "zxing-cpp>=2.2",  # 扫码兜底：服务端解码标签照片（比 ZXing JS 强）
 ]
 
 [project.scripts]

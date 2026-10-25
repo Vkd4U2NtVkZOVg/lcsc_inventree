@@ -64,6 +64,7 @@ def client(tmp_path):
 def import_patches(capacitor):
     fetcher = MagicMock()
     fetcher.fetch.return_value = capacitor
+    fetcher.fetch_cn_part.return_value = capacitor
     api = MagicMock()
     writer = MagicMock()
     writer.upsert_part.return_value = WriteResult(part_pk=7, created={"part": True})
@@ -71,6 +72,10 @@ def import_patches(capacitor):
             patch("lcsc2inv.web.build_inventree_api", return_value=api), \
             patch("lcsc2inv.web.InvenTreeWriter", return_value=writer):
         yield fetcher, api, writer
+
+
+# 真实立创标签 QR 内容（0402 电阻整盘标签）
+LABEL_QR = "{on:SO25040821121,pc:C17168,pm:0402WGF0000TCE,qty:100,mc:,cc:1,pdi:152840923,hp:11}"
 
 
 # ---------------------------------------------------------------------------
@@ -412,3 +417,142 @@ class TestQuickSearch:
 
         assert rv.status_code == 200
         mock_search.assert_called_once_with(mock_api.return_value, "test", 20)
+
+
+# ---------------------------------------------------------------------------
+# 扫码文本归一化（LCSC 标签 QR / 摄像头扫码 / 扫码枪）
+# ---------------------------------------------------------------------------
+
+
+_NOT_FOUND = {"found": False, "part_pk": None, "part_name": None, "ipn": None,
+              "mpn": None, "category": None, "in_stock": None, "match_type": None}
+_FOUND_7 = {"found": True, "part_pk": 7, "part_name": "Cap", "ipn": "C17168",
+            "mpn": None, "category": None, "in_stock": 0, "match_type": "ipn"}
+
+
+class TestScanNormalization:
+    def test_lookup_normalizes_label_qr(self, client):
+        """lookup 收到整段标签 QR 文本 → 归一化为 C-code 并回传 scan_quantity。"""
+        with patch("lcsc2inv.web.build_inventree_api"), \
+             patch("lcsc2inv.web.find_part") as mock_find:
+            mock_find.return_value = dict(_NOT_FOUND)
+            rv = client.post("/api/quick/lookup", json={"code": LABEL_QR})
+
+        assert rv.status_code == 200
+        data = rv.get_json()
+        assert data["lcsc_code"] == "C17168"
+        assert data["scan_quantity"] == 100
+        assert mock_find.call_args[0][1] == "C17168"
+
+    def test_lookup_plain_code_has_no_scan_quantity(self, client):
+        with patch("lcsc2inv.web.build_inventree_api"), \
+             patch("lcsc2inv.web.find_part") as mock_find:
+            mock_find.return_value = dict(_FOUND_7)
+            rv = client.post("/api/quick/lookup", json={"code": "C28323"})
+
+        data = rv.get_json()
+        assert data["scan_quantity"] is None
+
+    def test_stock_create_uses_cn_source(self, client, import_patches):
+        """自动建 Part 默认走国内站数据源（LCSC_PREFER_CN 默认开）。"""
+        fetcher, _api, _writer = import_patches
+        with patch("lcsc2inv.web.find_part") as mock_find, \
+             patch("lcsc2inv.web.add_or_merge_stock") as mock_add:
+            mock_find.side_effect = [dict(_NOT_FOUND), dict(_FOUND_7)]
+            mock_add.return_value = {
+                "stock_pk": 456, "quantity": 100, "merged": False, "new_quantity": 100,
+            }
+
+            rv = client.post("/api/quick/stock", json={
+                "code": LABEL_QR, "quantity": 100, "create_if_missing": True,
+            })
+
+        assert rv.status_code == 200
+        assert rv.get_json()["created_part"] is True
+        fetcher.fetch_cn_part.assert_called_once_with("C17168")
+        fetcher.fetch.assert_not_called()
+
+    def test_stock_create_intl_when_disabled(self, tmp_path, import_patches):
+        """LCSC_PREFER_CN=False 时退回国际站直连。"""
+        fetcher, _api, _writer = import_patches
+        settings = _settings(tmp_path, lcsc_prefer_cn=False)
+        with patch("lcsc2inv.web.get_settings", return_value=settings), \
+             app.test_client() as c, \
+             patch("lcsc2inv.web.find_part") as mock_find, \
+             patch("lcsc2inv.web.add_or_merge_stock") as mock_add:
+            mock_find.side_effect = [dict(_NOT_FOUND), dict(_FOUND_7)]
+            mock_add.return_value = {
+                "stock_pk": 456, "quantity": 100, "merged": False, "new_quantity": 100,
+            }
+
+            rv = c.post("/api/quick/stock", json={
+                "code": "C17168", "quantity": 100, "create_if_missing": True,
+            })
+
+        assert rv.status_code == 200
+        fetcher.fetch.assert_called_once_with("C17168")
+        fetcher.fetch_cn_part.assert_not_called()
+
+    def test_batch_row_qty_defaults_to_label_qty(self, client, import_patches):
+        """队列行贴整段标签文本、未填数量时自动用标签 qty。"""
+        _fetcher, _api, _writer = import_patches
+        with patch("lcsc2inv.web.find_part") as mock_find, \
+             patch("lcsc2inv.web.add_or_merge_stock") as mock_add:
+            mock_find.return_value = dict(_FOUND_7)
+            mock_add.return_value = {
+                "stock_pk": 456, "quantity": 100, "merged": False, "new_quantity": 100,
+            }
+
+            rv = client.post("/api/quick/batch", json={
+                "rows": [{"code": LABEL_QR, "quantity": ""}],
+            })
+
+        assert rv.status_code == 200
+        data = rv.get_json()
+        assert data["ok_count"] == 1
+        assert mock_add.call_args.kwargs["quantity"] == 100
+
+
+class TestBatchBindBarcode:
+    def test_batch_row_binds_barcode(self, client, import_patches):
+        """队列行携带 barcode 时，入库成功后自动绑定到该库存项。"""
+        _fetcher, _api, _writer = import_patches
+        with patch("lcsc2inv.web.find_part") as mock_find, \
+             patch("lcsc2inv.web.add_or_merge_stock") as mock_add, \
+             patch("lcsc2inv.web._bind_stock_barcode",
+                   return_value=(True, None, 200)) as mock_bind:
+            mock_find.return_value = dict(_FOUND_7)
+            mock_add.return_value = {
+                "stock_pk": 456, "quantity": 100, "merged": False, "new_quantity": 100,
+            }
+
+            rv = client.post("/api/quick/batch", json={
+                "rows": [{"code": "C17168", "quantity": 100, "barcode": "MYBIN-001"}],
+            })
+
+        assert rv.status_code == 200
+        data = rv.get_json()
+        assert data["ok_count"] == 1
+        mock_bind.assert_called_once_with(456, "MYBIN-001")
+        assert data["results"][0]["barcode_bound"] is True
+
+    def test_batch_row_bind_failure_keeps_stock_ok(self, client, import_patches):
+        """绑定失败不影响入库结果，仅标记 barcode_bound=False。"""
+        _fetcher, _api, _writer = import_patches
+        with patch("lcsc2inv.web.find_part") as mock_find, \
+             patch("lcsc2inv.web.add_or_merge_stock") as mock_add, \
+             patch("lcsc2inv.web._bind_stock_barcode",
+                   return_value=(False, "已被占用", 400)):
+            mock_find.return_value = dict(_FOUND_7)
+            mock_add.return_value = {
+                "stock_pk": 456, "quantity": 100, "merged": False, "new_quantity": 100,
+            }
+
+            rv = client.post("/api/quick/batch", json={
+                "rows": [{"code": "C17168", "quantity": 100, "barcode": "DUP"}],
+            })
+
+        assert rv.status_code == 200
+        result = rv.get_json()["results"][0]
+        assert result["ok"] is True
+        assert result["barcode_bound"] is False

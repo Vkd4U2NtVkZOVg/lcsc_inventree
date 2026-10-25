@@ -1378,3 +1378,32 @@ class TestOrderImport:
         })
         assert rv.status_code == 200
         assert writer.update_part_fields.call_args.kwargs["footprint"] is None
+
+
+# ---------------------------------------------------------------------------
+# 扫码兜底：POST /api/barcode/decode-image
+# ---------------------------------------------------------------------------
+
+
+class TestDecodeImage:
+    def test_missing_file(self, client):
+        rv = client.post("/api/barcode/decode-image")
+        assert rv.status_code == 400
+        assert rv.get_json()["ok"] is False
+
+    def test_empty_file(self, client):
+        rv = client.post(
+            "/api/barcode/decode-image",
+            data={"image": (b"", "empty.png")},
+            content_type="multipart/form-data",
+        )
+        assert rv.status_code == 400
+
+    def test_bad_image(self, client):
+        # 非图片内容 → 400（不依赖 zxing-cpp 是否安装）
+        rv = client.post(
+            "/api/barcode/decode-image",
+            data={"image": (b"not an image", "fake.png")},
+            content_type="multipart/form-data",
+        )
+        assert rv.status_code == 400

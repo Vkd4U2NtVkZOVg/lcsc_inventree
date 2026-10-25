@@ -1,11 +1,22 @@
 # LCSC → InvenTree Web 服务
 FROM mcr.microsoft.com/playwright/python:v1.47.0-jammy
 
+# 国内网络：pip 走清华镜像（宿主机访问 pypi.org 不稳定）
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
     LCSC_CONFIG_DIR=/opt/lcsc2inventree/config \
     LCSC_CACHE_DIR=/var/lib/lcsc2inventree/cache \
     INVENTREE_BACKUP_STORAGE=/backup
+
+# 兜底：基础镜像缺 pip 时（如误用 playwright 非 python 变体），经国内镜像装上
+RUN python3 -m pip --version >/dev/null 2>&1 || ( \
+      sed -i 's|//archive.ubuntu.com|//mirrors.tuna.tsinghua.edu.cn|g; \
+              s|//security.ubuntu.com|//mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list \
+      && apt-get update \
+      && apt-get install -y --no-install-recommends python3-pip \
+      && rm -rf /var/lib/apt/lists/* \
+    )
 
 WORKDIR /opt/lcsc2inventree
 

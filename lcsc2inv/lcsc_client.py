@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,8 @@ logger = logging.getLogger(__name__)
 LCSC_PRODUCT_URL_TEMPLATE = "https://www.lcsc.com/product-detail/{code}.html"
 # 国内立创商城（item.szlcsc.com）使用数字内部 ID，不接受 C-code 直链
 LCSC_CN_PRODUCT_URL_TEMPLATE = "https://item.szlcsc.com/{numeric_id}.html"
+# 国内站搜索页（带 JS 挑战，需浏览器渲染）；C-code → 第一个匹配商品 → 数字 ID
+SO_SEARCH_URL_TEMPLATE = "https://so.szlcsc.com/global.html?k={code}"
 LCSC_URL_PATTERN = re.compile(r"/product-detail/C(\d+)\.html", re.IGNORECASE)
 LCSC_CN_URL_PATTERN = re.compile(
     r"item\.szlcsc\.com/(?:mro/)?(\d+)\.html", re.IGNORECASE
@@ -312,6 +315,149 @@ def _from_nextdata(nd: dict[str, Any], *, page_url: str | None) -> LCSCPart:
     )
 
 
+def extract_cn_product_id(html: str) -> int | None:
+    """从国际站商品页 `__NEXT_DATA__` 中取国内站数字商品 ID。
+
+    国际站 `props.pageProps.webData.productId` 与国内站 `item.szlcsc.com/<id>.html`
+    的数字 ID 同源（同一商品库），可作 C-code → 国内页的直连映射。
+    """
+    m = NEXTDATA_PATTERN.search(html)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return None
+    wd = data.get("props", {}).get("pageProps", {}).get("webData") or {}
+    pid = wd.get("productId")
+    try:
+        return int(pid) if pid else None
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_cn_page(html: str, *, page_url: str | None = None) -> LCSCPart:
+    """解析国内站 `item.szlcsc.com` 商品页为 `LCSCPart`。
+
+    当前站点结构是 `__NEXT_DATA__` → `props.pageProps.webData`：
+    - `productRecord`：productCode / productModel / productName / 图片
+    - `brandVO`：品牌
+    - `paramList`：中文参数表
+    - `totalStockNumber`：总库存
+
+    旧版页面（无 webData.productRecord）回退到 `productDetailsVo` 解析。
+    Raises:
+        ValueError: 结构对不上且无 productCode 时。
+    """
+    m = NEXTDATA_PATTERN.search(html)
+    if not m:
+        raise ValueError("国内站页面缺少 __NEXT_DATA__")
+    try:
+        data = json.loads(m.group(1))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"__NEXT_DATA__ JSON 解析失败: {exc}") from exc
+    pp = data.get("props", {}).get("pageProps", {})
+    web = pp.get("webData") or {}
+    rec = web.get("productRecord") or {}
+    sku = str(rec.get("productCode") or "").strip()
+    if not sku:
+        # 旧版结构兜底
+        return _from_nextdata(pp.get("productDetailsVo") or pp or {}, page_url=page_url)
+
+    brand = None
+    bv = web.get("brandVO") or {}
+    brand_name = bv.get("brandName") or bv.get("brandNameEn")
+    if brand_name:
+        brand = Brand(name=str(brand_name))
+
+    params: list[PropertyValue] = []
+    for p in web.get("paramList") or []:
+        if not isinstance(p, dict):
+            continue
+        name = p.get("parameterName")
+        value = p.get("parameterValue") or p.get("parameterDetailValue")
+        if name and value:
+            params.append(PropertyValue(name=str(name).strip(), value=str(value).strip()))
+
+    images: list[str] = []
+    raw_imgs = rec.get("luceneBreviaryImageUrls")
+    if isinstance(raw_imgs, str) and raw_imgs:
+        # 多图以 <$> 分隔，末尾常混入品牌证书图（certificate 路径），一并过滤
+        images = [
+            u.strip()
+            for u in raw_imgs.split("<$>")
+            if u.strip().startswith("http") and "/certificate/" not in u
+        ]
+    if not images and rec.get("breviaryImageUrl"):
+        images = [str(rec["breviaryImageUrl"])]
+
+    offer = None
+    stock = web.get("totalStockNumber")
+    if stock is not None:
+        try:
+            offer = Offer(priceCurrency="CNY", inventoryLevel=int(stock))
+        except (TypeError, ValueError):
+            offer = None
+
+    catalog = web.get("currentCatalog") or {}
+    category = catalog.get("catalogNameEn") or catalog.get("catalogName") or None
+    cn_category = (catalog.get("catalogName") or None) if category != catalog.get("catalogName") else None
+
+    return LCSCPart(
+        sku=sku,
+        mpn=(str(rec["productModel"]).strip() if rec.get("productModel") else None),
+        name=rec.get("productName"),
+        description=rec.get("productName"),
+        brand=brand,
+        category=category,
+        image_urls=images,
+        additional_properties=params,
+        offer=offer,
+        datasheet_url=None,
+        page_url=page_url,
+        cn_category_name=cn_category,
+    )
+
+
+def merge_cn_part(cn: LCSCPart, intl: LCSCPart) -> LCSCPart:
+    """国内站数据为主（中文名 / 描述 / 参数），国际站补齐其余字段。
+
+    名称 = MPN（器件真实型号，如 "CL21C470JBANNNC"）；描述 = 国内站中文
+    规格串，缺类目词时拼上中文类目（如 "贴片电容 47pF ±5% 50V"）。
+    分类 / 价格 / 品牌名 / 图片优先国际站：分类映射表是英文 key，
+    品牌名与已有 Manufacturer 保持一致，国际站图片为高清原图；
+    国际站无实图（no_goods_pic 占位）时退回国内站图片。
+    """
+    def _with_category(text: str | None) -> str | None:
+        """描述缺中文类目词时拼前缀；已含（如 "厚膜电阻…"）则原样返回。"""
+        if not text or not cn_cat:
+            return text
+        tail = cn_cat[-2:] if len(cn_cat) >= 2 else cn_cat
+        if cn_cat in text or tail in text:
+            return text
+        return f"{cn_cat} {text}"
+
+    cn_cat = cn.cn_category_name
+    # Part 名称 = 器件真实型号（MPN）；中文规格串（含类目前缀）只作描述
+    name = intl.mpn or cn.mpn or intl.name or cn.name or cn.sku
+    description = _with_category(cn.description or intl.description)
+    intl_images = [u for u in intl.image_urls if "no_goods_pic" not in u]
+    return LCSCPart(
+        sku=cn.sku,
+        mpn=intl.mpn or cn.mpn,
+        name=name,
+        description=description,
+        brand=intl.brand or cn.brand,
+        category=intl.category or cn.category,
+        image_urls=intl_images or cn.image_urls,
+        additional_properties=intl.additional_properties or cn.additional_properties,
+        offer=intl.offer or cn.offer,
+        datasheet_url=intl.datasheet_url or cn.datasheet_url,
+        page_url=intl.page_url,
+        cn_category_name=cn_cat,
+    )
+
+
 def load_fixture(path: str | Path) -> LCSCPart:
     """从本地文件读取 HTML 并解析（用于测试 / 离线运行）。"""
     p = Path(path)
@@ -338,6 +484,32 @@ def load_fixture(path: str | Path) -> LCSCPart:
 
 class LcscFetchError(RuntimeError):
     """抓取 LCSC 商品页失败。"""
+
+
+# 进程级共享的 Playwright 浏览器。
+# sync API 启动后会在所在线程留下一个运行中的事件循环；web 层每个请求都新建
+# Fetcher 实例，若把浏览器存在实例上，同一线程的第二次 start() 会撞上该循环并报
+# 「Playwright Sync API inside the asyncio loop」。因此浏览器全局唯一，gunicorn
+# 单 worker 单线程下所有请求复用；Chromium 崩溃时自动重启。
+_GLOBAL_BROWSER: dict[str, Any] = {"pw": None, "browser": None}
+
+
+def _get_shared_browser():
+    if (
+        _GLOBAL_BROWSER["browser"] is not None
+        and _GLOBAL_BROWSER["browser"].is_connected()
+    ):
+        return _GLOBAL_BROWSER["browser"]
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise LcscFetchError("当前环境没有 Playwright 浏览器") from exc
+    if _GLOBAL_BROWSER["pw"] is None:
+        logger.info("[浏览器] 启动共享 Playwright Chromium…")
+        _GLOBAL_BROWSER["pw"] = sync_playwright().start()
+    logger.info("[浏览器] 启动 Chromium（共享实例）")
+    _GLOBAL_BROWSER["browser"] = _GLOBAL_BROWSER["pw"].chromium.launch(headless=True)
+    return _GLOBAL_BROWSER["browser"]
 
 
 @dataclass(slots=True)
@@ -423,12 +595,201 @@ class Fetcher:
         cached_html = self._cache_read(code)
         if cached_html is not None:
             logger.debug("缓存命中 %s", code)
-            return parse_ldjson(cached_html, page_url=source_url or product_url(code))
-
+            return self._parse_page(cached_html, code, source_url)
         url = source_url or product_url(code)
+        logger.info("[国际站] %s: 抓取商品页 %s", code, url)
         html = self._fetch_html(url)
         self._cache_write(code, html)
-        return parse_ldjson(html, page_url=url)
+        return self._parse_page(html, code, url)
+
+    def _parse_page(self, html: str, code: str, page_url: str | None) -> LCSCPart:
+        """按编码形态选择解析器：国内站优先 webData 新结构，失败回退 ld+json。"""
+        if code.startswith("CN:"):
+            try:
+                return parse_cn_page(html, page_url=page_url)
+            except ValueError as exc:
+                logger.debug("国内站 webData 解析失败，回退 ld+json: %s", exc)
+        return parse_ldjson(html, page_url=page_url)
+
+    # -- CN data source（国内站 item.szlcsc.com）---------------------------
+
+    _CN_ID_MAP_FILENAME = "cn_id_map.json"
+
+    def _cn_id_map_path(self) -> Path:
+        return self.settings.cache_dir_path / self._CN_ID_MAP_FILENAME
+
+    def _cn_id_map_get(self, code: str) -> int | None:
+        """读取 C-code → 国内站数字 ID 的持久映射（ID 与商品一一对应，无需 TTL）。"""
+        p = self._cn_id_map_path()
+        if not p.exists():
+            return None
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        value = (data.get("entries") or {}).get(code)
+        try:
+            return int(value) if value else None
+        except (TypeError, ValueError):
+            return None
+
+    def _cn_id_map_put(self, code: str, numeric_id: int) -> None:
+        p = self._cn_id_map_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        entries: dict[str, int] = {}
+        if p.exists():
+            try:
+                raw = json.loads(p.read_text(encoding="utf-8"))
+                entries = {k: int(v) for k, v in (raw.get("entries") or {}).items()}
+            except (json.JSONDecodeError, OSError, TypeError, ValueError):
+                entries = {}
+        entries[code] = int(numeric_id)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps({"entries": entries}, ensure_ascii=False, indent=0),
+            encoding="utf-8",
+        )
+        os.replace(tmp, p)
+
+    def _cn_numeric_id(self, code: str) -> int | None:
+        """C-code → 国内站数字 ID：先查映射缓存，未命中再从国际站页面抽取。"""
+        cached = self._cn_id_map_get(code)
+        if cached:
+            return cached
+        html = self._cache_read(code)
+        if html is None:
+            try:
+                html = self._fetch_html(product_url(code))
+            except LcscFetchError as exc:
+                logger.warning("抓取国际站页面失败，无法取得国内商品 ID %s: %s", code, exc)
+                return None
+            self._cache_write(code, html)
+        numeric = extract_cn_product_id(html)
+        if numeric:
+            logger.info("[CN数据源] %s: 国际站页解析出数字 ID #%d", code, numeric)
+            self._cn_id_map_put(code, numeric)
+        return numeric
+
+    def _cn_numeric_id_via_search(self, code: str) -> int | None:
+        """优先用国内站搜索页解析数字 ID（国际站不可达时的主路径）。"""
+        cached = self._cn_id_map_get(code)
+        if cached:
+            logger.info("[CN数据源] %s: 数字 ID 缓存命中 #%d", code, cached)
+            return cached
+        logger.info("[CN数据源] %s: 无 ID 缓存，打开国内站搜索页解析…", code)
+        numeric = self._search_first_cn_id(code)
+        if numeric:
+            logger.info("[CN数据源] %s: 搜索页命中第一个匹配项 #%d", code, numeric)
+            self._cn_id_map_put(code, numeric)
+        return numeric
+
+    def _get_browser(self):
+        """惰性获取进程级共享 Playwright Chromium（WAF 挑战页 / 搜索页渲染）。"""
+        return _get_shared_browser()
+
+    def _search_first_cn_id(self, code: str) -> int | None:
+        """在 so.szlcsc.com 搜索页取第一个匹配项的数字 ID。
+
+        搜索页带 JS 挑战（瑞数），必须 Playwright 渲染；从渲染后的页面内容里
+        抽取第一个 `item.szlcsc.com/<id>.html` 链接。任何失败返回 None。
+        """
+        try:
+            browser = self._get_browser()
+        except LcscFetchError:
+            return None
+        url = SO_SEARCH_URL_TEMPLATE.format(code=code)
+        page = browser.new_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=25000)
+            try:
+                # 挑战页会自动重载；等第一个商品链接出现，超时后兜底扫全文
+                page.wait_for_selector('a[href*="item.szlcsc.com"]', timeout=15000)
+            except Exception:  # noqa: BLE001
+                page.wait_for_timeout(2000)
+            content = page.content()
+            ids = re.findall(r"item\.szlcsc\.com/(\d+)\.html", content)
+            if not ids:
+                logger.warning("国内站搜索页未找到商品链接 %s", code)
+                return None
+            return int(ids[0])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("国内站搜索页解析 %s 失败: %s", code, exc)
+            return None
+        finally:
+            page.close()
+
+    def _fetch_cn_page_part(self, numeric: int) -> LCSCPart | None:
+        """抓取并解析国内站商品页（带 7 天 HTML 缓存）；失败返回 None。"""
+        cn_url = LCSC_CN_PRODUCT_URL_TEMPLATE.format(numeric_id=numeric)
+        cn_key = f"CN:{numeric}"
+        html = self._cache_read(cn_key)
+        if html is None:
+            logger.info("[CN数据源] 国内页 #%d: 抓取 %s", numeric, cn_url)
+            try:
+                html = self._fetch_html(cn_url)
+            except LcscFetchError as exc:
+                logger.warning("抓取国内站页面失败 #%s: %s", numeric, exc)
+                return None
+            self._cache_write(cn_key, html)
+        else:
+            logger.info("[CN数据源] 国内页 #%d: HTML 缓存命中", numeric)
+        try:
+            return parse_cn_page(html, page_url=cn_url)
+        except ValueError as exc:
+            logger.warning("国内站页面解析失败 #%s: %s", numeric, exc)
+            return None
+
+    def fetch_cn_part(self, code: str) -> LCSCPart:
+        """抓取国内站（item.szlcsc.com）商品数据，中文名/描述/参数优先。
+
+        数字 ID 解析顺序（结果永久缓存于 `cn_id_map.json`）：
+        1. `so.szlcsc.com` 搜索页第一个匹配项（Playwright，国内直连可靠）
+        2. 国际站商品页 `webData.productId`（requests，国际站可达时更快）
+
+        国际站数据用于补齐分类 / 价格 / 品牌名；**国际站不可达时不阻塞导入**，
+        直接返回国内站数据。仅当两条路径都失败时抛出原异常。
+
+        Raises:
+            LcscFetchError / ValueError: 国内国际均失败时照常抛出。
+        """
+        code = parse_lcsc_code(code)
+        if code.startswith("CN:"):
+            return self.fetch(code)
+        logger.info("[CN数据源] %s: 开始获取商品数据", code)
+
+        intl_part: LCSCPart | None = None
+        intl_error: Exception | None = None
+        numeric = self._cn_numeric_id_via_search(code)
+        if not numeric:
+            try:
+                intl_part = self.fetch(code)  # 顺带把国际站 HTML 写入缓存
+            except (LcscFetchError, ValueError) as exc:
+                intl_error = exc
+            numeric = self._cn_numeric_id(code)
+        if not numeric:
+            if intl_error is not None:
+                raise intl_error
+            return intl_part if intl_part is not None else self.fetch(code)
+
+        cn_part = self._fetch_cn_page_part(numeric)
+        if cn_part is None or cn_part.sku != code:
+            if cn_part is not None:
+                logger.warning(
+                    "国内站商品编码不一致（%s != %s），忽略国内数据", cn_part.sku, code
+                )
+            if intl_part is not None:
+                return intl_part
+            return self.fetch(code)
+
+        if intl_part is None:
+            try:
+                intl_part = self.fetch(code)
+            except LcscFetchError as exc:
+                logger.warning("国际站不可达，仅用国内站数据 %s: %s", code, exc)
+                logger.info("[CN数据源] %s: 完成（仅国内站数据）", code)
+                return cn_part
+        logger.info("[CN数据源] %s: 完成（国内站文本 + 国际站分类/价格合并）", code)
+        return merge_cn_part(cn_part, intl_part)
 
     def _fetch_html(self, url: str) -> str:
         last_exc: Exception | None = None
@@ -444,7 +805,8 @@ class Fetcher:
                     resp = self.session.get(url, timeout=20)
                 except requests.RequestException as exc:
                     last_exc = exc
-                    raise
+                    # 统一包装：调用方只 catch LcscFetchError（裸 ConnectionError 会穿透）
+                    raise LcscFetchError(f"请求失败 url={url}: {exc}") from exc
                 if resp.status_code in (403, 429):
                     raise LcscFetchError(f"被限流 HTTP {resp.status_code} url={url}")
                 if resp.status_code >= 400:
@@ -460,15 +822,12 @@ class Fetcher:
     def _fetch_html_browser(self, url: str) -> str:
         """国内站 WAF 挑战页需要执行 JS 后才能拿到商品 HTML。"""
         try:
-            from playwright.sync_api import sync_playwright
-        except ImportError as exc:
+            browser = self._get_browser()
+        except LcscFetchError as exc:
             raise LcscFetchError(
                 "国内站返回了反爬挑战页，但当前环境没有 Playwright 浏览器"
             ) from exc
-        if getattr(self, "_playwright", None) is None:
-            self._playwright = sync_playwright().start()
-            self._browser = self._playwright.chromium.launch(headless=True)
-        page = self._browser.new_page()
+        page = browser.new_page()
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=20000)
             page.wait_for_function(
@@ -533,7 +892,7 @@ class Fetcher:
                     resp = self.session.get(url, timeout=20)
                 except requests.RequestException as exc:
                     last_exc = exc
-                    raise
+                    raise LcscFetchError(f"图片请求失败 url={url}: {exc}") from exc
                 if resp.status_code in (403, 429):
                     raise LcscFetchError(f"图片下载被限流 HTTP {resp.status_code} url={url}")
                 if resp.status_code >= 400:

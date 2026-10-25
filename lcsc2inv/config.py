@@ -70,6 +70,10 @@ class Settings:
     # 图片上传：默认开启。Part 已 image 则跳过；--update 强制重传
     lcsc_upload_image: bool = True
 
+    # 快速入库自动建 Part 的数据源：True=国内站 item.szlcsc.com（中文名/描述/参数，
+    # 经国际站页映射数字 ID），失败自动退回国际站；False=直接用国际站 www.lcsc.com
+    lcsc_prefer_cn: bool = True
+
     # 抓取完成后是否打开浏览器
     open_browser: bool = False
 
@@ -120,6 +124,7 @@ def get_settings(*, force_reload: bool = False) -> Settings:
         category_match_ratio_limit=int(os.getenv("CATEGORY_MATCH_RATIO_LIMIT", "75")),
         dry_run=_to_bool(os.getenv("DRY_RUN"), False),
         lcsc_upload_image=_to_bool(os.getenv("LCSC_UPLOAD_IMAGE"), True),
+        lcsc_prefer_cn=_to_bool(os.getenv("LCSC_PREFER_CN"), True),
         open_browser=_to_bool(os.getenv("LCSC_OPEN_BROWSER"), False),
     )
     _cached = s
